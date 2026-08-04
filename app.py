@@ -24,7 +24,7 @@ from bid_assistant.models import (
 )
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
 from bid_assistant.reviewer import build_review_report
-from bid_assistant.storage import ProjectStore, safe_filename
+from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
 
 
 st.set_page_config(page_title="投标初稿助手", page_icon="📄", layout="wide")
@@ -187,7 +187,6 @@ def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
 
 store = get_store()
 llm_client = get_llm_client()
-projects = store.list_projects()
 
 st.sidebar.title("投标项目")
 new_name = st.sidebar.text_input("新项目名称", placeholder="例如：某某信息化项目")
@@ -196,8 +195,13 @@ if st.sidebar.button("新建项目", type="primary", width="stretch"):
     st.session_state["project_id"] = project["id"]
     st.rerun()
 
+show_archived = st.sidebar.toggle("显示已归档项目", key="show_archived_projects")
+projects = store.list_projects(include_archived=show_archived)
 project_ids = [project["id"] for project in projects]
-project_names = {project["id"]: project["name"] for project in projects}
+project_names = {
+    project["id"]: f"{project['name']}（已归档）" if project["archived"] else project["name"]
+    for project in projects
+}
 current_id = st.session_state.get("project_id")
 if current_id not in project_ids:
     current_id = project_ids[0] if project_ids else None
@@ -211,6 +215,44 @@ if project_ids:
     )
     st.session_state["project_id"] = selected_id
     current_id = selected_id
+
+with st.sidebar.expander("项目管理", expanded=False):
+    backup_upload = st.file_uploader(
+        "导入项目备份",
+        type=["zip"],
+        key="project_backup_upload",
+        help="仅支持由本系统导出的完整项目 ZIP 备份。",
+    )
+    if st.button("导入备份", disabled=backup_upload is None, width="stretch"):
+        try:
+            imported = store.import_project_archive(backup_upload.getvalue())
+            st.session_state["project_id"] = imported["id"]
+            st.success(f"已导入：{imported['name']}")
+            st.rerun()
+        except ProjectArchiveError as exc:
+            st.error(str(exc))
+
+    if current_id:
+        managed_project = store.get_project(current_id)
+        try:
+            backup_data = store.export_project_archive(current_id)
+            backup_name = safe_filename(f"{managed_project['name']}_完整备份.zip")
+            st.download_button(
+                "下载完整备份",
+                data=backup_data,
+                file_name=backup_name,
+                mime="application/zip",
+                width="stretch",
+            )
+        except ProjectArchiveError as exc:
+            st.warning(str(exc))
+
+        archive_label = "恢复项目" if managed_project["archived"] else "归档项目"
+        if st.button(archive_label, width="stretch", key=f"archive_{current_id}"):
+            store.set_project_archived(current_id, not bool(managed_project["archived"]))
+            if not managed_project["archived"] and not show_archived:
+                st.session_state.pop("project_id", None)
+            st.rerun()
 
 with st.sidebar.expander("模型配置", expanded=False):
     st.code(f"{settings.llm_model}\n{settings.llm_base_url}")
@@ -234,6 +276,18 @@ st.markdown(
     f'<div class="status-note">项目状态：{status_label}。流程中的分析结果和正文均可人工修改。</div>',
     unsafe_allow_html=True,
 )
+if project["archived"]:
+    st.warning("当前项目已归档，可在左侧“项目管理”中恢复。")
+
+workflow = store.project_progress(current_id)
+st.progress(
+    workflow["completed"] / workflow["total"],
+    text=f"项目流程：已完成 {workflow['completed']} / {workflow['total']}（{workflow['percent']}%）",
+)
+step_columns = st.columns(workflow["total"])
+for column, step in zip(step_columns, workflow["steps"], strict=True):
+    column.caption(f"{'✓' if step['complete'] else '○'} {step['label']}")
+st.caption(f"已关联知识资料：{workflow['knowledge_files']} 个文件")
 
 tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export = st.tabs(
     ["1. 招标文件", "2. 分析确认", "3. 知识资料", "4. 章节生成", "5. 复核检查", "6. Word 导出"]
