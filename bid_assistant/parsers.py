@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
+import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from docx import Document
 from pypdf import PdfReader
@@ -8,7 +13,12 @@ from pypdf import PdfReader
 from bid_assistant.models import ParsedDocument, ParsedPage
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+TENDER_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+KNOWLEDGE_EXTENSIONS = TENDER_EXTENSIONS | {".csv", ".json"}
+SUPPORTED_EXTENSIONS = KNOWLEDGE_EXTENSIONS
+
+MAX_JSON_VALUES = 50000
+MAX_JSON_DEPTH = 40
 
 
 class DocumentParseError(RuntimeError):
@@ -17,7 +27,7 @@ class DocumentParseError(RuntimeError):
 
 def _decode_text(path: Path) -> str:
     content = path.read_bytes()
-    for encoding in ("utf-8", "utf-8-sig", "gb18030", "gbk"):
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
         try:
             return content.decode(encoding)
         except UnicodeDecodeError:
@@ -57,6 +67,124 @@ def _parse_docx(path: Path) -> list[ParsedPage]:
     return [ParsedPage(page_number=None, text="\n".join(blocks))]
 
 
+def _unique_headers(values: list[str]) -> list[str]:
+    result: list[str] = []
+    counts: dict[str, int] = {}
+    for index, raw_value in enumerate(values, start=1):
+        value = re.sub(r"\s+", " ", raw_value).strip() or f"字段{index}"
+        counts[value] = counts.get(value, 0) + 1
+        suffix = f" ({counts[value]})" if counts[value] > 1 else ""
+        result.append(f"{value}{suffix}")
+    return result
+
+
+def _parse_csv(path: Path) -> tuple[list[ParsedPage], list[str]]:
+    text = _decode_text(path)
+    if not text.strip():
+        return [ParsedPage(page_number=1, text="")], ["CSV 文件为空。"]
+
+    sample = text[:8192]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
+    except csv.Error:
+        dialect = csv.excel
+
+    try:
+        reader = csv.reader(io.StringIO(text, newline=""), dialect=dialect, strict=True)
+        rows = [
+            [re.sub(r"\s+", " ", cell).strip() for cell in row]
+            for row in reader
+            if any(cell.strip() for cell in row)
+        ]
+    except csv.Error as exc:
+        raise DocumentParseError(f"CSV 无法读取：{exc}") from exc
+
+    if not rows:
+        return [ParsedPage(page_number=1, text="")], ["CSV 没有可用数据行。"]
+
+    headers = _unique_headers(rows[0])
+    blocks = ["CSV 字段：" + " | ".join(headers)]
+    for row_index, row in enumerate(rows[1:], start=1):
+        padded = row + [""] * max(0, len(headers) - len(row))
+        pairs = [
+            f"{headers[index]}: {value}"
+            for index, value in enumerate(padded[: len(headers)])
+            if value
+        ]
+        if len(row) > len(headers):
+            pairs.extend(
+                f"字段{index + 1}: {value}"
+                for index, value in enumerate(row[len(headers) :], start=len(headers))
+                if value
+            )
+        if pairs:
+            blocks.append(f"记录 {row_index}\n" + "\n".join(pairs))
+
+    return [ParsedPage(page_number=1, text="\n\n".join(blocks))], []
+
+
+def _json_scalar(value: object) -> str:
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value).strip()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _flatten_json(
+    value: object,
+    path: str,
+    lines: list[str],
+    *,
+    depth: int = 0,
+) -> bool:
+    if len(lines) >= MAX_JSON_VALUES:
+        return True
+    if depth > MAX_JSON_DEPTH:
+        lines.append(f"{path}: [嵌套层级超过 {MAX_JSON_DEPTH}，已停止展开]")
+        return False
+
+    if isinstance(value, dict):
+        if not value:
+            lines.append(f"{path}: {{}}")
+            return False
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            if _flatten_json(child, child_path, lines, depth=depth + 1):
+                return True
+        return False
+
+    if isinstance(value, list):
+        if not value:
+            lines.append(f"{path}: []")
+            return False
+        for index, child in enumerate(value):
+            child_path = f"{path}[{index}]" if path else f"记录[{index}]"
+            if _flatten_json(child, child_path, lines, depth=depth + 1):
+                return True
+        return False
+
+    lines.append(f"{path or '值'}: {_json_scalar(value)}")
+    return False
+
+
+def _parse_json(path: Path) -> tuple[list[ParsedPage], list[str]]:
+    text = _decode_text(path)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise DocumentParseError(
+            f"JSON 无法读取：第 {exc.lineno} 行、第 {exc.colno} 列格式错误。"
+        ) from exc
+
+    lines: list[str] = []
+    truncated = _flatten_json(payload, "", lines)
+    warnings: list[str] = []
+    if payload == {} or payload == []:
+        warnings.append("JSON 为空对象或空数组。")
+    if truncated:
+        warnings.append(f"JSON 字段超过 {MAX_JSON_VALUES} 个，仅保留前 {MAX_JSON_VALUES} 个值。")
+    return [ParsedPage(page_number=1, text="\n".join(lines))], warnings
+
+
 def parse_document(path: str | Path) -> ParsedDocument:
     source = Path(path)
     suffix = source.suffix.lower()
@@ -69,6 +197,12 @@ def parse_document(path: str | Path) -> ParsedDocument:
         warnings.extend(pdf_warnings)
     elif suffix == ".docx":
         pages = _parse_docx(source)
+    elif suffix == ".csv":
+        pages, csv_warnings = _parse_csv(source)
+        warnings.extend(csv_warnings)
+    elif suffix == ".json":
+        pages, json_warnings = _parse_json(source)
+        warnings.extend(json_warnings)
     else:
         pages = [ParsedPage(page_number=1, text=_decode_text(source).strip())]
 
@@ -93,3 +227,13 @@ def parse_document(path: str | Path) -> ParsedDocument:
         possible_scanned_document=possible_scanned,
         warnings=warnings,
     )
+
+
+def parse_document_bytes(filename: str, content: bytes) -> ParsedDocument:
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise DocumentParseError("文件名为空。")
+    with TemporaryDirectory(prefix="bid-assistant-parse-") as temporary_dir:
+        path = Path(temporary_dir) / safe_name
+        path.write_bytes(content)
+        return parse_document(path)

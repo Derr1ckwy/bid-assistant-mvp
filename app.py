@@ -14,7 +14,7 @@ from bid_assistant.config import Settings, save_llm_settings, settings
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
 from bid_assistant.exporter import export_docx
 from bid_assistant.generator import generate_chapter
-from bid_assistant.knowledge import search_knowledge
+from bid_assistant.knowledge import clear_knowledge_cache, search_knowledge
 from bid_assistant.llm import OpenAICompatibleClient
 from bid_assistant.models import (
     ChapterDraft,
@@ -34,7 +34,13 @@ from bid_assistant.packager import (
     create_submission_package,
     verify_submission_package,
 )
-from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
+from bid_assistant.parsers import (
+    KNOWLEDGE_EXTENSIONS,
+    TENDER_EXTENSIONS,
+    DocumentParseError,
+    parse_document,
+    parse_document_bytes,
+)
 from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
 from bid_assistant.submission import (
@@ -463,7 +469,7 @@ with tab_upload:
     st.subheader("上传并解析招标文件")
     uploaded = st.file_uploader(
         "支持 PDF、DOCX、TXT、Markdown",
-        type=[extension.lstrip(".") for extension in sorted(SUPPORTED_EXTENSIONS)],
+        type=[extension.lstrip(".") for extension in sorted(TENDER_EXTENSIONS)],
         key=f"tender_{current_id}",
     )
     if st.button("保存并解析", type="primary", disabled=uploaded is None, key=f"parse_{current_id}"):
@@ -771,15 +777,33 @@ with tab_knowledge:
     )
     knowledge_uploads = st.file_uploader(
         "上传资料",
-        type=[extension.lstrip(".") for extension in sorted(SUPPORTED_EXTENSIONS)],
+        type=[extension.lstrip(".") for extension in sorted(KNOWLEDGE_EXTENSIONS)],
         accept_multiple_files=True,
         key=f"knowledge_upload_{current_id}",
     )
     if st.button("保存资料", disabled=not knowledge_uploads, key=f"save_knowledge_{current_id}"):
+        valid_uploads = []
+        validation_errors: list[str] = []
         for item in knowledge_uploads:
-            store.save_knowledge_file(current_id, category, item.name, item.getvalue())
-        st.success(f"已保存 {len(knowledge_uploads)} 个文件")
-        st.rerun()
+            content = item.getvalue()
+            try:
+                parsed_knowledge = parse_document_bytes(item.name, content)
+                if not parsed_knowledge.full_text.strip():
+                    raise DocumentParseError("没有提取到可检索文本。")
+            except DocumentParseError as exc:
+                validation_errors.append(f"{item.name}：{exc}")
+                continue
+            valid_uploads.append((item.name, content))
+
+        for filename, content in valid_uploads:
+            store.save_knowledge_file(current_id, category, filename, content)
+        if valid_uploads:
+            clear_knowledge_cache()
+            st.success(f"已保存 {len(valid_uploads)} 个文件")
+        for message in validation_errors:
+            st.error(message)
+        if valid_uploads and not validation_errors:
+            st.rerun()
 
     files_by_category = store.list_knowledge_files(current_id)
     for category_id, paths in files_by_category.items():

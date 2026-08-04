@@ -1,9 +1,16 @@
 from pathlib import Path
 
+import pytest
 from docx import Document
 from pypdf import PdfWriter
 
-from bid_assistant.parsers import parse_document
+from bid_assistant.parsers import (
+    KNOWLEDGE_EXTENSIONS,
+    TENDER_EXTENSIONS,
+    DocumentParseError,
+    parse_document,
+    parse_document_bytes,
+)
 
 
 def test_parse_utf8_text(tmp_path: Path) -> None:
@@ -53,3 +60,67 @@ def test_blank_pdf_is_marked_as_possible_scan(tmp_path: Path) -> None:
 
     assert parsed.possible_scanned_document is True
     assert any("扫描件" in warning for warning in parsed.warnings)
+
+
+def test_parse_csv_preserves_headers_and_row_values(tmp_path: Path) -> None:
+    source = tmp_path / "company.csv"
+    source.write_text(
+        "公司名称,资质名称,有效期\n武汉灵坤数字科技有限公司,ISO 9001,2028-12-31\n",
+        encoding="utf-8-sig",
+    )
+
+    parsed = parse_document(source)
+
+    assert parsed.file_type == "csv"
+    assert "公司名称: 武汉灵坤数字科技有限公司" in parsed.full_text
+    assert "资质名称: ISO 9001" in parsed.full_text
+    assert "有效期: 2028-12-31" in parsed.full_text
+
+
+def test_parse_gb18030_csv(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.csv"
+    source.write_bytes("产品名称,功能\n投标助手,知识检索".encode("gb18030"))
+
+    parsed = parse_document(source)
+
+    assert "产品名称: 投标助手" in parsed.full_text
+    assert "功能: 知识检索" in parsed.full_text
+
+
+def test_parse_nested_json_preserves_field_paths(tmp_path: Path) -> None:
+    source = tmp_path / "company.json"
+    source.write_text(
+        '{"company":{"name":"武汉灵坤","certificates":[{"name":"ISO 9001","valid":true}]}}',
+        encoding="utf-8",
+    )
+
+    parsed = parse_document(source)
+
+    assert parsed.file_type == "json"
+    assert "company.name: 武汉灵坤" in parsed.full_text
+    assert "company.certificates[0].name: ISO 9001" in parsed.full_text
+    assert "company.certificates[0].valid: true" in parsed.full_text
+
+
+def test_invalid_json_raises_readable_error(tmp_path: Path) -> None:
+    source = tmp_path / "broken.json"
+    source.write_text('{"company":', encoding="utf-8")
+
+    with pytest.raises(DocumentParseError, match="JSON 无法读取"):
+        parse_document(source)
+
+
+def test_csv_and_json_are_limited_to_knowledge_uploads() -> None:
+    assert ".csv" in KNOWLEDGE_EXTENSIONS
+    assert ".json" in KNOWLEDGE_EXTENSIONS
+    assert ".csv" not in TENDER_EXTENSIONS
+    assert ".json" not in TENDER_EXTENSIONS
+
+
+def test_parse_document_bytes_validates_uploaded_json() -> None:
+    parsed = parse_document_bytes(
+        "company.json",
+        '{"company":{"name":"武汉灵坤"}}'.encode("utf-8"),
+    )
+
+    assert "company.name: 武汉灵坤" in parsed.full_text

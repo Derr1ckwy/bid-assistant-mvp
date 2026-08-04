@@ -43,3 +43,23 @@ def test_search_knowledge_caches_unchanged_files(tmp_path: Path, monkeypatch) ->
     source.write_text("项目实施质量保障流程和验收制度。", encoding="utf-8")
     search_knowledge("验收制度", files)
     assert calls == 2
+
+
+def test_search_knowledge_indexes_csv_and_json(tmp_path: Path) -> None:
+    company = tmp_path / "company.csv"
+    product = tmp_path / "product.json"
+    company.write_text(
+        "公司名称,资质名称\n武汉灵坤,信息安全管理体系认证",
+        encoding="utf-8",
+    )
+    product.write_text(
+        '{"product":{"name":"投标助手","features":["知识检索","风险复核"]}}',
+        encoding="utf-8",
+    )
+
+    files = {"company": [company], "product": [product], "history": []}
+    certificate_results = search_knowledge("信息安全管理体系认证", files)
+    feature_results = search_knowledge("风险复核", files)
+
+    assert certificate_results[0].source_file == "company.csv"
+    assert feature_results[0].source_file == "product.json"
