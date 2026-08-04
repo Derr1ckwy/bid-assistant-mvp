@@ -24,10 +24,16 @@ from bid_assistant.models import (
     SubmissionItem,
     TenderAnalysis,
 )
+from bid_assistant.packager import build_package_readiness, create_submission_package
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
 from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
-from bid_assistant.submission import SUBMISSION_CATEGORIES, summarize_submission_items, sync_submission_items
+from bid_assistant.submission import (
+    ATTACHMENT_CATEGORY_LABELS,
+    SUBMISSION_CATEGORIES,
+    summarize_submission_items,
+    sync_submission_items,
+)
 
 
 st.set_page_config(page_title="投标初稿助手", page_icon="📄", layout="wide")
@@ -52,14 +58,6 @@ CATEGORY_LABELS = {
 STATUS_OPTIONS = ["待确认", "已确认", "忽略", "待核对"]
 REVIEW_STATUS_OPTIONS = ["待处理", "已处理", "忽略"]
 SUBMISSION_STATUS_OPTIONS = ["待准备", "已备妥", "不适用"]
-ATTACHMENT_CATEGORY_LABELS = {
-    "qualification": "资格文件",
-    "business": "商务文件",
-    "technical": "技术文件",
-    "pricing": "报价文件",
-    "signature": "签章与装订",
-    "other": "其他附件",
-}
 PROJECT_STATUS_LABELS = {
     "new": "新建",
     "uploaded": "已上传",
@@ -70,6 +68,7 @@ PROJECT_STATUS_LABELS = {
     "draft_generated": "草稿已生成",
     "review_generated": "复核报告已生成",
     "exported": "Word 已导出",
+    "packaged": "提交包已生成",
 }
 
 
@@ -1026,3 +1025,162 @@ with tab_submission:
         key=f"download_submission_{current_id}",
         icon=":material/download:",
     )
+
+    st.markdown("#### 提交包")
+    export_versions = store.list_export_versions(current_id)
+    selected_word_version = None
+    if export_versions:
+        word_version_by_id = {item["id"]: item for item in export_versions}
+        selected_word_id = st.selectbox(
+            "选择用于打包的 Word 版本",
+            options=list(word_version_by_id),
+            format_func=lambda version_id: (
+                f"V{word_version_by_id[version_id]['version']:03d} | "
+                f"{word_version_by_id[version_id]['filename']}"
+            ),
+            key=f"package_word_version_{current_id}",
+        )
+        selected_word_version = word_version_by_id[selected_word_id]
+    else:
+        st.info("请先在“6. Word 导出”中生成至少一个 Word 版本。")
+
+    has_unsaved_changes = (
+        [item.model_dump() for item in edited_items]
+        != [item.model_dump() for item in submission_items]
+    )
+    review = _load_review(store, current_id)
+    package_readiness = build_package_readiness(
+        selected_word_version,
+        submission_items,
+        current_attachment_refs,
+        review,
+        has_unsaved_changes=has_unsaved_changes,
+    )
+    package_status_labels = {"pass": "通过", "warning": "需确认", "block": "不可打包"}
+    st.dataframe(
+        [
+            {
+                "check": item["label"],
+                "status": package_status_labels[item["status"]],
+                "detail": item["detail"],
+            }
+            for item in package_readiness["checks"]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "check": st.column_config.TextColumn("检查项", width="small"),
+            "status": st.column_config.TextColumn("结果", width="small"),
+            "detail": st.column_config.TextColumn("说明", width="large"),
+        },
+    )
+
+    package_acknowledged = not package_readiness["requires_confirmation"]
+    if package_readiness["blocking_count"]:
+        st.error(f"存在 {package_readiness['blocking_count']} 个不可打包项，请先处理后再生成提交包。")
+    if package_readiness["requires_confirmation"]:
+        package_acknowledged = st.checkbox(
+            "我已知悉复核风险，本次生成包仅用于内部预审",
+            key=f"package_ack_{current_id}",
+        )
+
+    package_note = st.text_input(
+        "提交包版本说明",
+        placeholder="例如：第一次内部预审",
+        key=f"package_note_{current_id}",
+    )
+    if st.button(
+        "生成提交包",
+        type="primary",
+        key=f"create_package_{current_id}",
+        disabled=not package_readiness["can_package"] or not package_acknowledged,
+        icon=":material/folder_zip:",
+    ):
+        with st.spinner("正在核对文件并生成提交包..."):
+            target = store.next_package_version(
+                current_id,
+                safe_filename(f"{project['name']}_最终提交包.zip"),
+            )
+            create_submission_package(
+                target["path"],
+                project=project,
+                word_version=selected_word_version,
+                items=submission_items,
+                attachment_files=attachment_files,
+                review_summary={
+                    "pending": review.pending_count() if review else 0,
+                    "high": review.severity_count("高") if review else 0,
+                    "medium": review.severity_count("中") if review else 0,
+                    "low": review.severity_count("低") if review else 0,
+                },
+                internal_review_only=package_readiness["requires_confirmation"],
+                note=package_note,
+            )
+            store.record_package_version(
+                current_id,
+                target["path"],
+                version=target["version"],
+                word_version=selected_word_version,
+                checklist_summary=package_readiness["submission_summary"],
+                attachment_count=sum(len(paths) for paths in attachment_files.values()),
+                warning_count=package_readiness["warning_count"],
+                internal_review_only=package_readiness["requires_confirmation"],
+                note=package_note,
+            )
+            store.update_project(current_id, status="packaged")
+        st.session_state["project_flash"] = f"提交包 P{target['version']:03d} 已生成"
+        st.rerun()
+
+    package_versions = store.list_package_versions(current_id)
+    if package_versions:
+        st.markdown("##### 提交包版本记录")
+        st.dataframe(
+            [
+                {
+                    "version": f"P{item['version']:03d}",
+                    "created_at": item["created_at"].replace("T", " ").replace("+00:00", " UTC"),
+                    "word": f"V{item['word_version']:03d}",
+                    "attachments": item["attachment_count"],
+                    "warnings": item["warning_count"],
+                    "scope": "仅内部预审" if item["internal_review_only"] else "可进入提交复核",
+                    "note": item["note"] or "-",
+                }
+                for item in package_versions
+            ],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "version": st.column_config.TextColumn("版本", width="small"),
+                "created_at": st.column_config.TextColumn("生成时间", width="medium"),
+                "word": st.column_config.TextColumn("Word", width="small"),
+                "attachments": st.column_config.NumberColumn("附件", width="small"),
+                "warnings": st.column_config.NumberColumn("风险确认", width="small"),
+                "scope": st.column_config.TextColumn("用途", width="medium"),
+                "note": st.column_config.TextColumn("版本说明", width="large"),
+            },
+        )
+        package_by_id = {item["id"]: item for item in package_versions}
+        selected_package_id = st.selectbox(
+            "选择下载提交包版本",
+            options=list(package_by_id),
+            format_func=lambda version_id: (
+                f"P{package_by_id[version_id]['version']:03d} | "
+                f"{package_by_id[version_id]['filename']}"
+            ),
+            key=f"package_version_{current_id}",
+        )
+        selected_package = package_by_id[selected_package_id]
+        st.download_button(
+            "下载所选提交包",
+            data=selected_package["path"].read_bytes(),
+            file_name=selected_package["filename"],
+            mime="application/zip",
+            width="stretch",
+            icon=":material/download:",
+        )
+        st.caption(
+            f"SHA-256：{selected_package['sha256']} · "
+            f"{selected_package['size'] / 1024 / 1024:.2f} MB"
+        )
+    else:
+        st.caption("尚未生成提交包版本。")

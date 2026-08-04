@@ -9,6 +9,7 @@ import pytest
 from bid_assistant.storage import (
     MAX_DRAFT_VERSIONS,
     MAX_EXPORT_VERSIONS,
+    MAX_PACKAGE_VERSIONS,
     ProjectArchiveError,
     ProjectStore,
     safe_filename,
@@ -105,7 +106,17 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
         chapter_count=1,
         review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
     )
-    store.update_project(project_id, status="exported")
+    old_package = store.package_path(project_id, "旧提交包_P001.zip")
+    old_package.write_bytes(b"package")
+    store.record_package_version(
+        project_id,
+        old_package,
+        version=1,
+        word_version={"version": 1, "filename": old_output.name},
+        checklist_summary={"total": 1, "required": 1, "ready": 1, "complete": True},
+        attachment_count=1,
+    )
+    store.update_project(project_id, status="packaged")
 
     duplicate = store.duplicate_project(project_id)
 
@@ -119,8 +130,10 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert sum(len(paths) for paths in store.list_attachment_files(duplicate["id"]).values()) == 0
     assert store.load_json(duplicate["id"], "submission_checklist") is None
     assert not (store.project_dir(duplicate["id"]) / "output").exists()
+    assert not (store.project_dir(duplicate["id"]) / "packages").exists()
     assert store.list_draft_versions(duplicate["id"]) == []
     assert store.list_export_versions(duplicate["id"]) == []
+    assert store.list_package_versions(duplicate["id"]) == []
 
 
 def test_draft_versions_can_be_listed_and_restored(tmp_path: Path) -> None:
@@ -181,7 +194,7 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     progress = store.project_progress(project_id)
 
     assert progress["completed"] == 4
-    assert progress["percent"] == 57
+    assert progress["percent"] == 50
     assert progress["knowledge_files"] == 1
     assert progress["attachment_files"] == 1
 
@@ -193,7 +206,26 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
 
     completed_progress = store.project_progress(project_id)
     assert completed_progress["completed"] == 5
-    assert completed_progress["steps"][-1]["complete"] is True
+    assert completed_progress["steps"][-2]["complete"] is True
+
+    package = store.package_path(project_id, "提交包_P001.zip")
+    package.write_bytes(b"package")
+    store.record_package_version(
+        project_id,
+        package,
+        version=1,
+        word_version={"version": 1, "filename": "投标文件_V001.docx"},
+        checklist_summary={"total": 1, "required": 1, "ready": 1, "complete": True},
+        attachment_count=1,
+    )
+
+    packaged_progress = store.project_progress(project_id)
+    assert packaged_progress["completed"] == 6
+    assert packaged_progress["steps"][-1] == {
+        "key": "package",
+        "label": "提交打包",
+        "complete": True,
+    }
 
 
 def test_attachment_files_are_categorized_unique_and_deletable(tmp_path: Path) -> None:
@@ -271,6 +303,82 @@ def test_word_output_retention_keeps_latest_versions(tmp_path: Path) -> None:
     assert all(item["version"] != 1 for item in versions)
 
 
+def test_submission_packages_are_versioned_and_recorded(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("提交包版本测试")
+
+    first = store.next_package_version(project["id"], "测试项目_最终提交包.zip")
+    first["path"].write_bytes(b"first package")
+    first_record = store.record_package_version(
+        project["id"],
+        first["path"],
+        version=first["version"],
+        word_version={"version": 3, "filename": "测试项目_投标文件_V003.docx"},
+        checklist_summary={
+            "total": 6,
+            "required": 5,
+            "ready": 5,
+            "not_applicable": 1,
+            "pending_required": 0,
+            "linked": 4,
+            "broken_links": 0,
+            "complete": True,
+        },
+        attachment_count=4,
+        warning_count=1,
+        internal_review_only=True,
+        note="第一次内部预审",
+    )
+    second = store.next_package_version(project["id"], "测试项目_最终提交包.zip")
+    second["path"].write_bytes(b"second package")
+    store.record_package_version(
+        project["id"],
+        second["path"],
+        version=second["version"],
+        word_version={"version": 4, "filename": "测试项目_投标文件_V004.docx"},
+        checklist_summary={"total": 6, "required": 5, "ready": 5, "complete": True},
+        attachment_count=5,
+    )
+
+    versions = store.list_package_versions(project["id"])
+
+    assert first["filename"].endswith("_P001.zip")
+    assert second["filename"].endswith("_P002.zip")
+    assert first_record["sha256"]
+    assert [item["version"] for item in versions] == [2, 1]
+    assert versions[1]["word_version"] == 3
+    assert versions[1]["checklist_summary"]["required"] == 5
+    assert versions[1]["attachment_count"] == 4
+    assert versions[1]["warning_count"] == 1
+    assert versions[1]["internal_review_only"] is True
+    assert versions[1]["note"] == "第一次内部预审"
+
+
+def test_submission_package_retention_keeps_latest_versions(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("提交包版本上限测试")
+
+    for index in range(MAX_PACKAGE_VERSIONS + 2):
+        target = store.next_package_version(project["id"], "最终提交包.zip")
+        target["path"].write_bytes(f"package-{index}".encode())
+        store.record_package_version(
+            project["id"],
+            target["path"],
+            version=target["version"],
+            word_version={"version": 1, "filename": "投标文件_V001.docx"},
+            checklist_summary={"total": 1, "required": 1, "ready": 1, "complete": True},
+            attachment_count=0,
+        )
+
+    versions = store.list_package_versions(project["id"])
+    package_files = list((store.project_dir(project["id"]) / "packages").glob("*.zip"))
+
+    assert len(versions) == MAX_PACKAGE_VERSIONS
+    assert len(package_files) == MAX_PACKAGE_VERSIONS
+    assert versions[0]["version"] == MAX_PACKAGE_VERSIONS + 2
+    assert all(item["version"] != 1 for item in versions)
+
+
 def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     source_store = ProjectStore(tmp_path / "source")
     source = source_store.create_project("迁移项目")
@@ -293,6 +401,17 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
         review_summary={"pending": 1, "high": 1, "medium": 0, "low": 0},
         note="备份版本",
     )
+    package = source_store.package_path(source["id"], "提交包_P001.zip")
+    package.write_bytes(b"package")
+    source_store.record_package_version(
+        source["id"],
+        package,
+        version=1,
+        word_version={"version": 1, "filename": output.name},
+        checklist_summary={"total": 1, "required": 1, "ready": 1, "complete": True},
+        attachment_count=1,
+        note="备份提交包",
+    )
     backup = source_store.export_project_archive(source["id"])
 
     target_store = ProjectStore(tmp_path / "target")
@@ -305,6 +424,8 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     assert target_store.source_path(imported["id"]).read_text(encoding="utf-8") == "招标内容"
     assert target_store.output_path(imported["id"], "初稿.docx").read_bytes() == b"docx"
     assert target_store.list_export_versions(imported["id"])[0]["note"] == "备份版本"
+    assert target_store.list_package_versions(imported["id"])[0]["note"] == "备份提交包"
+    assert target_store.list_package_versions(imported["id"])[0]["path"].read_bytes() == b"package"
     assert target_store.list_attachment_files(imported["id"])["qualification"][0].read_bytes() == b"license"
     assert target_store.load_json(imported["id"], "submission_checklist")[0]["status"] == "已备妥"
 

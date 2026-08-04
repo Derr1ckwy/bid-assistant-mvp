@@ -4,6 +4,14 @@ from bid_assistant.models import SubmissionItem, TenderAnalysis
 
 
 SUBMISSION_CATEGORIES = ["资格文件", "商务文件", "技术文件", "报价文件", "签章与装订", "其他"]
+ATTACHMENT_CATEGORY_LABELS = {
+    "qualification": "资格文件",
+    "business": "商务文件",
+    "technical": "技术文件",
+    "pricing": "报价文件",
+    "signature": "签章与装订",
+    "other": "其他附件",
+}
 
 
 def infer_submission_category(content: str) -> str:

@@ -21,11 +21,13 @@ MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_DRAFT_VERSIONS = 50
 MAX_EXPORT_VERSIONS = 50
+MAX_PACKAGE_VERSIONS = 20
 ATTACHMENT_CATEGORIES = {"qualification", "business", "technical", "pricing", "signature", "other"}
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
 _DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _EXPORT_VERSION_PATTERN = re.compile(r"exportv_\d{8}T\d{12}Z_[0-9a-f]{8}")
+_PACKAGE_VERSION_PATTERN = re.compile(r"packagev_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _WINDOWS_RESERVED_NAME = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
 
 
@@ -180,7 +182,7 @@ class ProjectStore:
         try:
             for path in source.rglob("*"):
                 relative = path.relative_to(source)
-                if relative.parts[0] in {"output", "versions", "attachments"}:
+                if relative.parts[0] in {"output", "versions", "attachments", "packages"}:
                     continue
                 if relative.as_posix() == "submission_checklist.json":
                     continue
@@ -194,7 +196,7 @@ class ProjectStore:
                     shutil.copy2(path, destination)
 
             status = project["status"]
-            if status == "exported":
+            if status in {"exported", "packaged"}:
                 if (temporary / "review.json").is_file():
                     status = "review_generated"
                 elif (temporary / "drafts.json").is_file():
@@ -512,6 +514,153 @@ class ProjectStore:
                 continue
         return result
 
+    def package_path(self, project_id: str, filename: str) -> Path:
+        packages_dir = self.project_dir(project_id) / "packages"
+        packages_dir.mkdir(exist_ok=True)
+        return packages_dir / safe_filename(filename)
+
+    def next_package_version(self, project_id: str, base_filename: str) -> dict:
+        versions = self.list_package_versions(project_id)
+        version = max((item["version"] for item in versions), default=0) + 1
+        sanitized = safe_filename(base_filename)
+        stem = Path(sanitized).stem or "提交包"
+        while True:
+            filename = safe_filename(f"{stem}_P{version:03d}.zip")
+            path = self.package_path(project_id, filename)
+            if not path.exists():
+                return {"version": version, "filename": filename, "path": path}
+            version += 1
+
+    def record_package_version(
+        self,
+        project_id: str,
+        package_path: str | Path,
+        *,
+        version: int,
+        word_version: dict,
+        checklist_summary: dict,
+        attachment_count: int,
+        warning_count: int = 0,
+        internal_review_only: bool = False,
+        note: str = "",
+    ) -> dict:
+        word_number = word_version.get("version")
+        word_filename = word_version.get("filename")
+        if (
+            version < 1
+            or not isinstance(word_number, int)
+            or word_number < 1
+            or not isinstance(word_filename, str)
+            or word_filename != safe_filename(word_filename)
+            or attachment_count < 0
+        ):
+            raise ValueError("Invalid package version metadata")
+
+        packages_dir = (self.project_dir(project_id) / "packages").resolve()
+        target = Path(package_path).resolve()
+        if target.parent != packages_dir or target.suffix.lower() != ".zip" or not target.is_file():
+            raise ValueError("Package file must be an existing project ZIP package")
+
+        summary_keys = (
+            "total",
+            "required",
+            "ready",
+            "not_applicable",
+            "pending_required",
+            "linked",
+            "broken_links",
+        )
+        normalized_summary = {
+            key: max(0, int(checklist_summary.get(key, 0)))
+            for key in summary_keys
+        }
+        normalized_summary["complete"] = bool(checklist_summary.get("complete", False))
+
+        version_id = f"packagev_{_version_stamp()}_{uuid4().hex[:8]}"
+        payload = {
+            "id": version_id,
+            "version": version,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "filename": target.name,
+            "size": target.stat().st_size,
+            "sha256": _sha256(target),
+            "word_version": word_number,
+            "word_filename": word_filename,
+            "checklist_summary": normalized_summary,
+            "attachment_count": int(attachment_count),
+            "warning_count": max(0, int(warning_count)),
+            "internal_review_only": bool(internal_review_only),
+            "note": note.strip()[:200],
+        }
+        versions_dir = self.project_dir(project_id) / "versions" / "packages"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        manifest = versions_dir / f"{version_id}.json"
+        temporary = manifest.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(manifest)
+
+        manifests = sorted(versions_dir.glob("packagev_*.json"), reverse=True)
+        for expired in manifests[MAX_PACKAGE_VERSIONS:]:
+            try:
+                expired_payload = json.loads(expired.read_text(encoding="utf-8"))
+                expired_name = expired_payload.get("filename")
+                if isinstance(expired_name, str) and expired_name == safe_filename(expired_name):
+                    expired_package = packages_dir / expired_name
+                    if expired_package.is_file():
+                        expired_package.unlink()
+            except (OSError, json.JSONDecodeError):
+                pass
+            expired.unlink(missing_ok=True)
+        return {**payload, "path": target}
+
+    def list_package_versions(self, project_id: str) -> list[dict]:
+        versions_dir = self.project_dir(project_id) / "versions" / "packages"
+        if not versions_dir.exists():
+            return []
+        packages_dir = self.project_dir(project_id) / "packages"
+        result: list[dict] = []
+        for manifest in sorted(versions_dir.glob("packagev_*.json"), reverse=True):
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                filename = payload.get("filename")
+                version = payload.get("version")
+                if (
+                    payload.get("id") != manifest.stem
+                    or not _PACKAGE_VERSION_PATTERN.fullmatch(manifest.stem)
+                    or not isinstance(filename, str)
+                    or filename != safe_filename(filename)
+                    or not isinstance(version, int)
+                    or version < 1
+                ):
+                    continue
+                path = packages_dir / filename
+                if not path.is_file():
+                    continue
+                checklist_summary = payload.get("checklist_summary")
+                if not isinstance(checklist_summary, dict):
+                    checklist_summary = {}
+                result.append(
+                    {
+                        "id": payload["id"],
+                        "version": version,
+                        "created_at": payload.get("created_at", ""),
+                        "filename": filename,
+                        "size": path.stat().st_size,
+                        "sha256": payload.get("sha256", ""),
+                        "word_version": int(payload.get("word_version", 0)),
+                        "word_filename": str(payload.get("word_filename", "")),
+                        "checklist_summary": checklist_summary,
+                        "attachment_count": int(payload.get("attachment_count", 0)),
+                        "warning_count": int(payload.get("warning_count", 0)),
+                        "internal_review_only": bool(payload.get("internal_review_only", False)),
+                        "note": str(payload.get("note", "")),
+                        "path": path,
+                    }
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return result
+
     def project_progress(self, project_id: str) -> dict:
         project_path = self.project_dir(project_id)
         source_ready = self.source_path(project_id) is not None
@@ -540,6 +689,7 @@ class ProjectStore:
                 and any(path.is_file() and path.suffix.lower() == ".docx" for path in output_dir.iterdir()),
             },
             {"key": "submission", "label": "提交清单", "complete": checklist_complete},
+            {"key": "package", "label": "提交打包", "complete": bool(self.list_package_versions(project_id))},
         ]
         completed = sum(bool(step["complete"]) for step in steps)
         knowledge_count = sum(len(paths) for paths in self.list_knowledge_files(project_id).values())
