@@ -806,11 +806,45 @@ with tab_knowledge:
             st.rerun()
 
     files_by_category = store.list_knowledge_files(current_id)
+    pending_delete_key = f"pending_knowledge_delete_{current_id}"
     for category_id, paths in files_by_category.items():
         with st.expander(f"{CATEGORY_LABELS[category_id]}（{len(paths)}）", expanded=bool(paths)):
             if paths:
                 for path in paths:
-                    st.write(path.name)
+                    reference = f"{category_id}/{path.name}"
+                    file_columns = st.columns([6, 1])
+                    file_columns[0].write(f"{path.name} · {path.stat().st_size / 1024:.1f} KB")
+                    if file_columns[1].button(
+                        "删除",
+                        key=f"request_delete_knowledge_{current_id}_{reference}",
+                        icon=":material/delete:",
+                        help=f"删除 {path.name}",
+                    ):
+                        st.session_state[pending_delete_key] = reference
+                        st.rerun()
+
+                    if st.session_state.get(pending_delete_key) == reference:
+                        st.warning(f"确认删除“{path.name}”？删除后无法从系统内恢复。")
+                        confirm_columns = st.columns([1, 1, 4])
+                        if confirm_columns[0].button(
+                            "确认删除",
+                            type="primary",
+                            key=f"confirm_delete_knowledge_{current_id}_{reference}",
+                        ):
+                            deleted = store.delete_knowledge_file(current_id, reference)
+                            st.session_state.pop(pending_delete_key, None)
+                            if deleted:
+                                clear_knowledge_cache()
+                                st.session_state["project_flash"] = f"已删除知识资料：{path.name}"
+                            else:
+                                st.session_state["project_flash"] = f"资料已不存在：{path.name}"
+                            st.rerun()
+                        if confirm_columns[1].button(
+                            "取消",
+                            key=f"cancel_delete_knowledge_{current_id}_{reference}",
+                        ):
+                            st.session_state.pop(pending_delete_key, None)
+                            st.rerun()
             else:
                 st.caption("暂无资料")
 

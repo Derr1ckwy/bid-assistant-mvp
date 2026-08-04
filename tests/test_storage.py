@@ -43,6 +43,22 @@ def test_store_rejects_invalid_identifiers(tmp_path: Path) -> None:
         store.save_attachment_file("project", "unknown", "a.txt", b"x")
 
 
+@pytest.mark.parametrize("category", ["company", "product", "history"])
+def test_knowledge_files_are_categorized_and_deletable(tmp_path: Path, category: str) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("知识资料删除测试")
+    source = store.save_knowledge_file(project["id"], category, "产品参数?.json", b"{}")
+    reference = f"{category}/{source.name}"
+
+    assert source.name == "产品参数_.json"
+    assert store.knowledge_path(project["id"], reference) == source
+    assert store.knowledge_path(project["id"], "../bad") is None
+    assert store.knowledge_path(project["id"], "unknown/file.json") is None
+    assert store.delete_knowledge_file(project["id"], reference) is True
+    assert store.delete_knowledge_file(project["id"], reference) is False
+    assert store.list_knowledge_files(project["id"])[category] == []
+
+
 def test_safe_filename_removes_path_and_windows_characters() -> None:
     assert safe_filename("..\\folder\\bad?.txt") == "bad_.txt"
     assert safe_filename("../folder/bad?.txt") == "bad_.txt"

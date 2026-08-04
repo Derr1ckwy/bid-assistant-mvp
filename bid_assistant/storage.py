@@ -22,6 +22,7 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_DRAFT_VERSIONS = 50
 MAX_EXPORT_VERSIONS = 50
 MAX_PACKAGE_VERSIONS = 20
+KNOWLEDGE_CATEGORIES = {"company", "product", "history"}
 ATTACHMENT_CATEGORIES = {"qualification", "business", "technical", "pricing", "signature", "other"}
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
@@ -337,7 +338,7 @@ class ProjectStore:
         return drafts
 
     def save_knowledge_file(self, project_id: str, category: str, filename: str, content: bytes) -> Path:
-        if category not in {"company", "product", "history"}:
+        if category not in KNOWLEDGE_CATEGORIES:
             raise ValueError("Invalid knowledge category")
         target_dir = self.project_dir(project_id) / "knowledge" / category
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -354,6 +355,27 @@ class ProjectStore:
             if category_dir.exists():
                 result[category] = sorted(path for path in category_dir.iterdir() if path.is_file())
         return result
+
+    def knowledge_path(self, project_id: str, reference: str) -> Path | None:
+        parts = reference.split("/")
+        if len(parts) != 2 or parts[0] not in KNOWLEDGE_CATEGORIES:
+            return None
+        filename = parts[1]
+        if filename != safe_filename(filename):
+            return None
+        path = self.project_dir(project_id) / "knowledge" / parts[0] / filename
+        return path if path.is_file() else None
+
+    def delete_knowledge_file(self, project_id: str, reference: str) -> bool:
+        path = self.knowledge_path(project_id, reference)
+        if path is None:
+            return False
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        return True
 
     def save_attachment_file(self, project_id: str, category: str, filename: str, content: bytes) -> Path:
         if category not in ATTACHMENT_CATEGORIES:
