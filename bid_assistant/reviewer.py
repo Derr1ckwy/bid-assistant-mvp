@@ -382,3 +382,119 @@ def build_review_report(analysis: TenderAnalysis, drafts: list[ChapterDraft]) ->
         issues.append(_issue("高", "章节完整性", "尚未生成任何章节草稿。", "完成章节计划并生成至少一个章节。"))
 
     return ReviewReport(issues=issues)
+
+
+def build_export_checklist(
+    analysis: TenderAnalysis,
+    drafts: list[ChapterDraft],
+    review: ReviewReport,
+) -> dict:
+    pending = [item for item in review.issues if item.status == "待处理"]
+
+    missing_fields = [
+        label
+        for label, value in (
+            ("项目名称", analysis.project_info.project_name),
+            ("招标人/采购人", analysis.project_info.purchaser),
+            ("预算/最高限价", analysis.project_info.budget),
+            ("投标截止时间", analysis.project_info.bid_deadline),
+            ("代理机构", analysis.project_info.agency),
+        )
+        if not value.strip()
+    ]
+    checks = [
+        {
+            "key": "project_info",
+            "label": "项目基本信息",
+            "status": "warning" if missing_fields else "pass",
+            "detail": (
+                "待确认：" + "、".join(missing_fields)
+                if missing_fields
+                else "项目名称、采购人、预算、截止时间和代理机构均已填写。"
+            ),
+        }
+    ]
+
+    draft_ids = {item.chapter_id for item in drafts}
+    selected_plans = [item for item in analysis.outline if item.selected]
+    missing_chapters = [item.title for item in selected_plans if item.id not in draft_ids]
+    if not drafts:
+        chapter_status = "block"
+        chapter_detail = "尚未生成章节草稿。"
+    elif missing_chapters:
+        chapter_status = "warning"
+        chapter_detail = "尚未生成：" + "、".join(missing_chapters)
+    else:
+        chapter_status = "pass"
+        chapter_detail = f"已生成 {len(drafts)} 个章节，覆盖全部已选目录。"
+    checks.append(
+        {
+            "key": "chapters",
+            "label": "章节完整性",
+            "status": chapter_status,
+            "detail": chapter_detail,
+        }
+    )
+
+    high_count = review.severity_count("高")
+    checks.append(
+        {
+            "key": "high_risk",
+            "label": "高风险问题",
+            "status": "warning" if high_count else "pass",
+            "detail": f"仍有 {high_count} 个高风险问题待处理。" if high_count else "没有待处理高风险问题。",
+        }
+    )
+
+    placeholder_count = sum(item.category == "正文占位符" for item in pending)
+    checks.append(
+        {
+            "key": "placeholders",
+            "label": "正文占位符",
+            "status": "warning" if placeholder_count else "pass",
+            "detail": (
+                f"仍有 {placeholder_count} 个章节包含待补充或待确认内容。"
+                if placeholder_count
+                else "未发现待补充、待确认或待核对占位文字。"
+            ),
+        }
+    )
+
+    evidence_count = sum(item.category in {"资料依据", "原文追溯"} for item in pending)
+    checks.append(
+        {
+            "key": "evidence",
+            "label": "证据与原文追溯",
+            "status": "warning" if evidence_count else "pass",
+            "detail": (
+                f"仍有 {evidence_count} 个资料依据或原文追溯问题。"
+                if evidence_count
+                else "资料依据和原文追溯检查已通过。"
+            ),
+        }
+    )
+
+    checks.append(
+        {
+            "key": "review_progress",
+            "label": "复核处理进度",
+            "status": "warning" if pending else "pass",
+            "detail": (
+                f"待处理 {len(pending)} 项，已处理或忽略 {len(review.issues) - len(pending)} 项。"
+                if review.issues
+                else "当前复核报告没有问题项。"
+            ),
+        }
+    )
+
+    blocking_count = sum(item["status"] == "block" for item in checks)
+    warning_count = sum(item["status"] == "warning" for item in checks)
+    return {
+        "checks": checks,
+        "can_export": blocking_count == 0,
+        "requires_confirmation": warning_count > 0,
+        "blocking_count": blocking_count,
+        "warning_count": warning_count,
+        "pending_count": len(pending),
+        "high_count": high_count,
+    }

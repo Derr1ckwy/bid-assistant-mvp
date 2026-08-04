@@ -23,7 +23,7 @@ from bid_assistant.models import (
     TenderAnalysis,
 )
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
-from bid_assistant.reviewer import build_review_report
+from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
 
 
@@ -655,26 +655,131 @@ with tab_export:
     if not analysis or not drafts:
         st.info("完成分析和章节生成后才能导出 Word。")
     else:
-        st.subheader("导出固定格式 Word 初稿")
+        st.subheader("导出 Word 初稿")
         review = _load_review(store, current_id) or build_review_report(analysis, drafts)
-        st.write(
-            f"准备导出 {len(drafts)} 个章节，并附带强制要求、评分项和 {review.pending_count()} 个待处理复核问题。"
+        readiness = build_export_checklist(analysis, drafts, review)
+        versions = store.list_export_versions(current_id)
+
+        metrics = st.columns(4)
+        metrics[0].metric("章节", len(drafts))
+        metrics[1].metric("待处理", readiness["pending_count"])
+        metrics[2].metric("高风险", readiness["high_count"])
+        metrics[3].metric("Word 版本", len(versions))
+
+        status_labels = {"pass": "通过", "warning": "需确认", "block": "不可导出"}
+        checklist_rows = [
+            {
+                "check": item["label"],
+                "status": status_labels[item["status"]],
+                "detail": item["detail"],
+            }
+            for item in readiness["checks"]
+        ]
+        st.dataframe(
+            checklist_rows,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "check": st.column_config.TextColumn("检查项", width="small"),
+                "status": st.column_config.TextColumn("结果", width="small"),
+                "detail": st.column_config.TextColumn("说明", width="large"),
+            },
         )
+
+        acknowledged = not readiness["requires_confirmation"]
+        if readiness["blocking_count"]:
+            st.error("存在不可导出项，请先完成章节草稿。")
+        elif readiness["requires_confirmation"]:
+            acknowledged = st.checkbox(
+                "我已知悉未处理风险，本次文件仅用于内部复核",
+                key=f"export_ack_{current_id}",
+            )
+
         project_name = analysis.project_info.project_name or project["name"]
         output_name = safe_filename(f"{project_name}_投标文件初稿.docx")
-        output_path = store.output_path(current_id, output_name)
-        if st.button("生成 Word", type="primary", key=f"export_{current_id}"):
+        version_note = st.text_input(
+            "版本说明",
+            placeholder="例如：第一次内部评审",
+            key=f"export_note_{current_id}",
+        )
+        if st.button(
+            "生成新版本",
+            type="primary",
+            key=f"export_{current_id}",
+            disabled=not readiness["can_export"] or not acknowledged,
+            icon=":material/description:",
+        ):
             with st.spinner("正在生成 Word..."):
                 store.save_json(current_id, "review", review.model_dump())
-                export_docx(output_path, analysis, drafts, review)
+                target = store.next_output_version(current_id, output_name)
+                export_docx(target["path"], analysis, drafts, review)
+                store.record_export_version(
+                    current_id,
+                    target["path"],
+                    version=target["version"],
+                    chapter_count=len(drafts),
+                    review_summary={
+                        "pending": review.pending_count(),
+                        "high": review.severity_count("高"),
+                        "medium": review.severity_count("中"),
+                        "low": review.severity_count("低"),
+                    },
+                    warning_count=readiness["warning_count"],
+                    note=version_note,
+                )
                 store.update_project(current_id, status="exported")
-            st.success("Word 已生成")
-        if output_path.exists():
+            st.session_state["project_flash"] = f"Word V{target['version']:03d} 已生成"
+            st.rerun()
+
+        versions = store.list_export_versions(current_id)
+        if versions:
+            st.subheader("Word 版本记录")
+            history_rows = []
+            for item in versions:
+                summary = item["review_summary"]
+                history_rows.append(
+                    {
+                        "version": f"V{item['version']:03d}",
+                        "created_at": item["created_at"].replace("T", " ").replace("+00:00", " UTC"),
+                        "chapters": item["chapter_count"],
+                        "pending": summary.get("pending", 0),
+                        "high": summary.get("high", 0),
+                        "note": item["note"] or "-",
+                    }
+                )
+            st.dataframe(
+                history_rows,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "version": st.column_config.TextColumn("版本", width="small"),
+                    "created_at": st.column_config.TextColumn("生成时间", width="medium"),
+                    "chapters": st.column_config.NumberColumn("章节", width="small"),
+                    "pending": st.column_config.NumberColumn("待处理", width="small"),
+                    "high": st.column_config.NumberColumn("高风险", width="small"),
+                    "note": st.column_config.TextColumn("版本说明", width="large"),
+                },
+            )
+
+            version_by_id = {item["id"]: item for item in versions}
+            selected_version_id = st.selectbox(
+                "选择下载版本",
+                options=list(version_by_id),
+                format_func=lambda version_id: (
+                    f"V{version_by_id[version_id]['version']:03d} | "
+                    f"{version_by_id[version_id]['filename']}"
+                ),
+                key=f"export_version_{current_id}",
+            )
+            selected_version = version_by_id[selected_version_id]
             st.download_button(
-                "下载 Word",
-                data=output_path.read_bytes(),
-                file_name=output_path.name,
+                "下载所选 Word",
+                data=selected_version["path"].read_bytes(),
+                file_name=selected_version["filename"],
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 width="stretch",
+                icon=":material/download:",
             )
-            st.caption(str(output_path))
+            st.caption(str(selected_version["path"]))
+        else:
+            st.caption("尚未生成 Word 版本。")

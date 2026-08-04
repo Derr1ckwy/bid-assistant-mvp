@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from bid_assistant.storage import MAX_DRAFT_VERSIONS, ProjectArchiveError, ProjectStore, safe_filename
+from bid_assistant.storage import (
+    MAX_DRAFT_VERSIONS,
+    MAX_EXPORT_VERSIONS,
+    ProjectArchiveError,
+    ProjectStore,
+    safe_filename,
+)
 
 
 def test_project_store_round_trip(tmp_path: Path) -> None:
@@ -86,7 +92,15 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     store.save_json(project_id, "review", {"issues": []})
     store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
     store.save_draft_version(project_id, [{"title": "第一版"}], "首次保存")
-    store.output_path(project_id, "旧初稿.docx").write_bytes(b"docx")
+    old_output = store.output_path(project_id, "旧初稿.docx")
+    old_output.write_bytes(b"docx")
+    store.record_export_version(
+        project_id,
+        old_output,
+        version=1,
+        chapter_count=1,
+        review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
+    )
     store.update_project(project_id, status="exported")
 
     duplicate = store.duplicate_project(project_id)
@@ -100,6 +114,7 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert store.list_knowledge_files(duplicate["id"])["company"][0].read_bytes() == b"company"
     assert not (store.project_dir(duplicate["id"]) / "output").exists()
     assert store.list_draft_versions(duplicate["id"]) == []
+    assert store.list_export_versions(duplicate["id"]) == []
 
 
 def test_draft_versions_can_be_listed_and_restored(tmp_path: Path) -> None:
@@ -163,13 +178,81 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     assert progress["knowledge_files"] == 1
 
 
+def test_word_outputs_are_versioned_and_recorded(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("导出版本测试")
+
+    first = store.next_output_version(project["id"], "测试项目_投标文件初稿.docx")
+    first["path"].write_bytes(b"first docx")
+    first_record = store.record_export_version(
+        project["id"],
+        first["path"],
+        version=first["version"],
+        chapter_count=6,
+        review_summary={"pending": 3, "high": 1, "medium": 2, "low": 0},
+        warning_count=2,
+        note="第一次评审",
+    )
+    second = store.next_output_version(project["id"], "测试项目_投标文件初稿.docx")
+    second["path"].write_bytes(b"second docx")
+    store.record_export_version(
+        project["id"],
+        second["path"],
+        version=second["version"],
+        chapter_count=6,
+        review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
+    )
+
+    versions = store.list_export_versions(project["id"])
+
+    assert first["filename"].endswith("_V001.docx")
+    assert second["filename"].endswith("_V002.docx")
+    assert first_record["sha256"]
+    assert [item["version"] for item in versions] == [2, 1]
+    assert versions[1]["note"] == "第一次评审"
+    assert versions[1]["review_summary"]["high"] == 1
+
+
+def test_word_output_retention_keeps_latest_versions(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("导出版本上限测试")
+
+    for index in range(MAX_EXPORT_VERSIONS + 2):
+        target = store.next_output_version(project["id"], "投标文件初稿.docx")
+        target["path"].write_bytes(f"docx-{index}".encode())
+        store.record_export_version(
+            project["id"],
+            target["path"],
+            version=target["version"],
+            chapter_count=1,
+            review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
+        )
+
+    versions = store.list_export_versions(project["id"])
+    output_files = list((store.project_dir(project["id"]) / "output").glob("*.docx"))
+
+    assert len(versions) == MAX_EXPORT_VERSIONS
+    assert len(output_files) == MAX_EXPORT_VERSIONS
+    assert versions[0]["version"] == MAX_EXPORT_VERSIONS + 2
+    assert all(item["version"] != 1 for item in versions)
+
+
 def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     source_store = ProjectStore(tmp_path / "source")
     source = source_store.create_project("迁移项目")
     source_store.save_source(source["id"], "招标文件.txt", "招标内容".encode())
     source_store.save_json(source["id"], "analysis", {"ok": True})
     source_store.save_knowledge_file(source["id"], "company", "企业.txt", b"company")
-    source_store.output_path(source["id"], "初稿.docx").write_bytes(b"docx")
+    output = source_store.output_path(source["id"], "初稿.docx")
+    output.write_bytes(b"docx")
+    source_store.record_export_version(
+        source["id"],
+        output,
+        version=1,
+        chapter_count=2,
+        review_summary={"pending": 1, "high": 1, "medium": 0, "low": 0},
+        note="备份版本",
+    )
     backup = source_store.export_project_archive(source["id"])
 
     target_store = ProjectStore(tmp_path / "target")
@@ -181,6 +264,7 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     assert target_store.load_json(imported["id"], "analysis") == {"ok": True}
     assert target_store.source_path(imported["id"]).read_text(encoding="utf-8") == "招标内容"
     assert target_store.output_path(imported["id"], "初稿.docx").read_bytes() == b"docx"
+    assert target_store.list_export_versions(imported["id"])[0]["note"] == "备份版本"
 
     duplicate = target_store.import_project_archive(backup)
     assert duplicate["id"] != source["id"]

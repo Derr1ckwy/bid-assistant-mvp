@@ -20,9 +20,11 @@ MAX_ARCHIVE_FILES = 500
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_DRAFT_VERSIONS = 50
+MAX_EXPORT_VERSIONS = 50
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
 _DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
+_EXPORT_VERSION_PATTERN = re.compile(r"exportv_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _WINDOWS_RESERVED_NAME = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
 
 
@@ -352,6 +354,118 @@ class ProjectStore:
         output_dir = self.project_dir(project_id) / "output"
         output_dir.mkdir(exist_ok=True)
         return output_dir / safe_filename(filename)
+
+    def next_output_version(self, project_id: str, base_filename: str) -> dict:
+        versions = self.list_export_versions(project_id)
+        version = max((item["version"] for item in versions), default=0) + 1
+        sanitized = safe_filename(base_filename)
+        stem = Path(sanitized).stem or "投标文件初稿"
+        while True:
+            filename = safe_filename(f"{stem}_V{version:03d}.docx")
+            path = self.output_path(project_id, filename)
+            if not path.exists():
+                return {"version": version, "filename": filename, "path": path}
+            version += 1
+
+    def record_export_version(
+        self,
+        project_id: str,
+        output_path: str | Path,
+        *,
+        version: int,
+        chapter_count: int,
+        review_summary: dict[str, int],
+        warning_count: int = 0,
+        note: str = "",
+    ) -> dict:
+        if version < 1 or chapter_count < 1:
+            raise ValueError("Invalid export version metadata")
+        output_dir = (self.project_dir(project_id) / "output").resolve()
+        target = Path(output_path).resolve()
+        if target.parent != output_dir or target.suffix.lower() != ".docx" or not target.is_file():
+            raise ValueError("Export file must be an existing project Word output")
+
+        version_id = f"exportv_{_version_stamp()}_{uuid4().hex[:8]}"
+        payload = {
+            "id": version_id,
+            "version": version,
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "filename": target.name,
+            "size": target.stat().st_size,
+            "sha256": _sha256(target),
+            "chapter_count": chapter_count,
+            "review_summary": {
+                key: max(0, int(review_summary.get(key, 0)))
+                for key in ("pending", "high", "medium", "low")
+            },
+            "warning_count": max(0, int(warning_count)),
+            "note": note.strip()[:200],
+        }
+        versions_dir = self.project_dir(project_id) / "versions" / "exports"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        manifest = versions_dir / f"{version_id}.json"
+        temporary = manifest.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(manifest)
+
+        manifests = sorted(versions_dir.glob("exportv_*.json"), reverse=True)
+        for expired in manifests[MAX_EXPORT_VERSIONS:]:
+            try:
+                expired_payload = json.loads(expired.read_text(encoding="utf-8"))
+                expired_name = expired_payload.get("filename")
+                if isinstance(expired_name, str) and expired_name == safe_filename(expired_name):
+                    expired_output = output_dir / expired_name
+                    if expired_output.is_file():
+                        expired_output.unlink()
+            except (OSError, json.JSONDecodeError):
+                pass
+            expired.unlink(missing_ok=True)
+        return {**payload, "path": target}
+
+    def list_export_versions(self, project_id: str) -> list[dict]:
+        versions_dir = self.project_dir(project_id) / "versions" / "exports"
+        if not versions_dir.exists():
+            return []
+        output_dir = self.project_dir(project_id) / "output"
+        result: list[dict] = []
+        for manifest in sorted(versions_dir.glob("exportv_*.json"), reverse=True):
+            try:
+                payload = json.loads(manifest.read_text(encoding="utf-8"))
+                filename = payload.get("filename")
+                version = payload.get("version")
+                if (
+                    payload.get("id") != manifest.stem
+                    or not _EXPORT_VERSION_PATTERN.fullmatch(manifest.stem)
+                    or not isinstance(filename, str)
+                    or filename != safe_filename(filename)
+                    or not isinstance(version, int)
+                    or version < 1
+                ):
+                    continue
+                path = output_dir / filename
+                if not path.is_file():
+                    continue
+                review_summary = payload.get("review_summary")
+                if not isinstance(review_summary, dict):
+                    review_summary = {}
+                result.append(
+                    {
+                        "id": payload["id"],
+                        "version": version,
+                        "created_at": payload.get("created_at", ""),
+                        "filename": filename,
+                        "size": path.stat().st_size,
+                        "sha256": payload.get("sha256", ""),
+                        "chapter_count": int(payload.get("chapter_count", 0)),
+                        "review_summary": review_summary,
+                        "warning_count": int(payload.get("warning_count", 0)),
+                        "note": str(payload.get("note", "")),
+                        "path": path,
+                    }
+                )
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+        return result
 
     def project_progress(self, project_id: str) -> dict:
         project_path = self.project_dir(project_id)

@@ -5,7 +5,7 @@ from bid_assistant.models import (
     RequirementItem,
     TenderAnalysis,
 )
-from bid_assistant.reviewer import build_review_report
+from bid_assistant.reviewer import build_export_checklist, build_review_report
 
 
 def test_review_report_finds_missing_and_unconfirmed_content() -> None:
@@ -118,3 +118,36 @@ def test_review_report_detects_amount_date_personnel_and_qualification_conflicts
     assert any("投标截止时间出现不一致值" in message for message in messages)
     assert any("技术人员数量出现不一致值" in message for message in messages)
     assert any("资质有效期（ISO9001）出现不一致值" in message for message in messages)
+
+
+def test_export_checklist_requires_confirmation_for_pending_risks() -> None:
+    plan = ChapterPlan(title="技术方案")
+    analysis = TenderAnalysis(
+        project_info=ProjectInfo(project_name="测试项目"),
+        outline=[plan],
+    )
+    drafts = [
+        ChapterDraft(
+            chapter_id=plan.id,
+            title=plan.title,
+            markdown="技术参数待确认。",
+        )
+    ]
+    review = build_review_report(analysis, drafts)
+
+    checklist = build_export_checklist(analysis, drafts, review)
+
+    assert checklist["can_export"] is True
+    assert checklist["requires_confirmation"] is True
+    assert checklist["warning_count"] > 0
+    assert any(item["key"] == "placeholders" and item["status"] == "warning" for item in checklist["checks"])
+
+
+def test_export_checklist_blocks_when_no_drafts_exist() -> None:
+    analysis = TenderAnalysis(project_info=ProjectInfo(project_name="测试项目"))
+    review = build_review_report(analysis, [])
+
+    checklist = build_export_checklist(analysis, [], review)
+
+    assert checklist["can_export"] is False
+    assert checklist["blocking_count"] == 1
