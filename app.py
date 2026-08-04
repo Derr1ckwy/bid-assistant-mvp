@@ -462,7 +462,9 @@ tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export, t
         "5. 复核检查",
         "6. Word 导出",
         "7. 提交清单",
-    ]
+    ],
+    key=f"project_tabs_{current_id}",
+    on_change="rerun",
 )
 
 with tab_upload:
