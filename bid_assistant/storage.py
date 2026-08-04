@@ -19,8 +19,10 @@ MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_FILES = 500
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_DRAFT_VERSIONS = 50
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
+_DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _WINDOWS_RESERVED_NAME = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
 
 
@@ -30,6 +32,10 @@ class ProjectArchiveError(ValueError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _version_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _sha256(path: Path) -> str:
@@ -161,6 +167,60 @@ class ProjectStore:
         if cursor.rowcount == 0:
             raise KeyError(f"Project not found: {project_id}")
 
+    def duplicate_project(self, project_id: str, name: str | None = None) -> dict:
+        project = self.get_project(project_id)
+        source = self.project_dir(project_id)
+        new_id = self._new_project_id()
+        temporary = self.projects_dir / f".copy_{uuid4().hex}"
+        target = self.projects_dir / new_id
+        temporary.mkdir()
+        try:
+            for path in source.rglob("*"):
+                relative = path.relative_to(source)
+                if relative.parts[0] in {"output", "versions"}:
+                    continue
+                if path.is_symlink():
+                    raise ValueError("项目目录包含符号链接，无法安全复制")
+                destination = temporary / relative
+                if path.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                elif path.is_file() and not path.name.endswith(".tmp"):
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, destination)
+
+            status = project["status"]
+            if status == "exported":
+                if (temporary / "review.json").is_file():
+                    status = "review_generated"
+                elif (temporary / "drafts.json").is_file():
+                    status = "draft_generated"
+                else:
+                    status = "analysis_confirmed"
+            source_filename = project.get("source_filename")
+            if source_filename and not (temporary / "source" / source_filename).is_file():
+                source_filename = None
+            timestamp = _now()
+            default_name = f"{project['name']}（副本）"
+            duplicate_name = (name or default_name).strip()[:200] or default_name
+
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO projects
+                        (id, name, status, source_filename, created_at, updated_at, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (new_id, duplicate_name, status, source_filename, timestamp, timestamp),
+                )
+                temporary.replace(target)
+        except Exception:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+            if target.exists() and not self._project_exists(new_id):
+                shutil.rmtree(target)
+            raise
+        return self.get_project(new_id)
+
     def save_source(self, project_id: str, filename: str, content: bytes) -> Path:
         source_dir = self.project_dir(project_id) / "source"
         source_dir.mkdir(exist_ok=True)
@@ -191,6 +251,83 @@ class ProjectStore:
         if not target.exists():
             return default
         return json.loads(target.read_text(encoding="utf-8"))
+
+    def delete_json(self, project_id: str, name: str) -> bool:
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
+            raise ValueError("Invalid JSON document name")
+        target = self.project_dir(project_id) / f"{name}.json"
+        if not target.exists():
+            return False
+        target.unlink()
+        return True
+
+    def save_draft_version(self, project_id: str, drafts: list[dict], reason: str) -> dict:
+        if not isinstance(drafts, list) or not drafts:
+            raise ValueError("Draft version requires at least one draft")
+        version_id = f"draftv_{_version_stamp()}_{uuid4().hex[:8]}"
+        created_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        payload = {
+            "id": version_id,
+            "created_at": created_at,
+            "reason": reason.strip()[:100] or "草稿保存",
+            "draft_count": len(drafts),
+            "drafts": drafts,
+        }
+        versions_dir = self.project_dir(project_id) / "versions" / "drafts"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        target = versions_dir / f"{version_id}.json"
+        temporary = target.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(target)
+
+        paths = sorted(versions_dir.glob("draftv_*.json"), reverse=True)
+        for expired in paths[MAX_DRAFT_VERSIONS:]:
+            expired.unlink()
+        return {key: payload[key] for key in ("id", "created_at", "reason", "draft_count")}
+
+    def list_draft_versions(self, project_id: str) -> list[dict]:
+        versions_dir = self.project_dir(project_id) / "versions" / "drafts"
+        if not versions_dir.exists():
+            return []
+        result: list[dict] = []
+        for path in sorted(versions_dir.glob("draftv_*.json"), reverse=True):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if payload.get("id") != path.stem or not isinstance(payload.get("drafts"), list):
+                    continue
+                result.append(
+                    {
+                        "id": payload["id"],
+                        "created_at": payload.get("created_at", ""),
+                        "reason": payload.get("reason", "草稿保存"),
+                        "draft_count": len(payload["drafts"]),
+                    }
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
+        return result
+
+    def load_draft_version(self, project_id: str, version_id: str) -> dict:
+        if not _DRAFT_VERSION_PATTERN.fullmatch(version_id):
+            raise ValueError("Invalid draft version id")
+        target = self.project_dir(project_id) / "versions" / "drafts" / f"{version_id}.json"
+        if not target.is_file():
+            raise KeyError(f"Draft version not found: {version_id}")
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if payload.get("id") != version_id or not isinstance(payload.get("drafts"), list):
+            raise ValueError("Invalid draft version payload")
+        return payload
+
+    def restore_draft_version(self, project_id: str, version_id: str) -> list[dict]:
+        version = self.load_draft_version(project_id, version_id)
+        current = self.load_json(project_id, "drafts", [])
+        if current:
+            self.save_draft_version(project_id, current, "恢复版本前自动快照")
+        drafts = version["drafts"]
+        self.save_json(project_id, "drafts", drafts)
+        self.delete_json(project_id, "review")
+        self.update_project(project_id, status="draft_generated")
+        return drafts
 
     def save_knowledge_file(self, project_id: str, category: str, filename: str, content: bytes) -> Path:
         if category not in {"company", "product", "history"}:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from decimal import Decimal, InvalidOperation
+from typing import Callable
 
 from bid_assistant.models import ChapterDraft, ReviewIssue, ReviewReport, TenderAnalysis
 
@@ -13,6 +15,132 @@ CONSISTENCY_PATTERNS = {
     ),
     "质保期": re.compile(r"(?:质保期|保修期)[^。；\n]{0,24}?(\d+\s*(?:个)?(?:工作日|日|天|个月|月|年))"),
 }
+AMOUNT_TEXT = r"[0-9][0-9,，\s]*(?:\.\d+)?\s*(?:亿元|万元|万|元)"
+DATE_TEXT = (
+    r"20\d{2}\s*(?:年|[./-])\s*\d{1,2}\s*(?:月|[./-])\s*\d{1,2}\s*日?"
+    r"(?:\s*(?:上午|下午)?\s*\d{1,2}\s*(?::|时)\s*\d{1,2}\s*分?)?"
+)
+PERSONNEL_PATTERN = re.compile(
+    r"(?P<role>项目经理|项目负责人|技术负责人|实施人员|技术人员|售后服务人员|售后人员|运维人员|团队成员)"
+    r"[^。；\n]{0,18}?(?P<count>\d+)\s*(?:名|人)"
+)
+QUALIFICATION_EXPIRY_PATTERN = re.compile(
+    rf"(?P<name>(?:ISO\s*(?:9001|14001|45001)|CMMI(?:\s*[1-5])?|ITSS|"
+    rf"高新技术企业(?:证书|资质)?|信息安全管理体系认证|质量管理体系认证|环境管理体系认证|"
+    rf"职业健康安全管理体系认证|[\u4e00-\u9fa5A-Za-z0-9（）()_-]{{2,24}}?(?:证书|资质|认证)))"
+    rf"[^。；\n]{{0,30}}?(?:有效期(?:限)?至|有效截止(?:日期)?(?:为|至)?|有效期截止(?:至|于)?)"
+    rf"\s*(?P<value>{DATE_TEXT})",
+    re.IGNORECASE,
+)
+
+
+def _normalize_amount(value: str) -> str:
+    compact = re.sub(r"[,，\s]", "", value)
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(亿元|万元|万|元)", compact)
+    if not match:
+        return compact
+    factors = {
+        "亿元": Decimal("100000000"),
+        "万元": Decimal("10000"),
+        "万": Decimal("10000"),
+        "元": Decimal("1"),
+    }
+    try:
+        yuan = Decimal(match.group(1)) * factors[match.group(2)]
+    except InvalidOperation:
+        return compact
+    return format(yuan.normalize(), "f")
+
+
+def _normalize_date(value: str) -> str:
+    date_match = re.search(
+        r"(20\d{2})\s*(?:年|[./-])\s*(\d{1,2})\s*(?:月|[./-])\s*(\d{1,2})",
+        value,
+    )
+    if not date_match:
+        return re.sub(r"\s+", "", value)
+    normalized = (
+        f"{int(date_match.group(1)):04d}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+    )
+    time_match = re.search(
+        r"(?:(上午|下午)\s*)?(\d{1,2})\s*(?::|时)\s*(\d{1,2})",
+        value[date_match.end() :],
+    )
+    if time_match:
+        hour = int(time_match.group(2))
+        if time_match.group(1) == "下午" and hour < 12:
+            hour += 12
+        if time_match.group(1) == "上午" and hour == 12:
+            hour = 0
+        normalized += f" {hour:02d}:{int(time_match.group(3)):02d}"
+    return normalized
+
+
+LABELED_CONSISTENCY_PATTERNS: tuple[tuple[str, re.Pattern, Callable[[str], str]], ...] = (
+    (
+        "项目预算/最高限价",
+        re.compile(rf"(?:采购预算|项目预算|预算金额|最高限价)[^。；\n]{{0,30}}?({AMOUNT_TEXT})"),
+        _normalize_amount,
+    ),
+    (
+        "投标报价",
+        re.compile(rf"(?:投标总价|报价总额|总报价|投标报价)[^。；\n]{{0,30}}?({AMOUNT_TEXT})"),
+        _normalize_amount,
+    ),
+    (
+        "投标截止时间",
+        re.compile(rf"(?:投标截止(?:时间)?|递交截止(?:时间)?)[^。；\n]{{0,36}}?({DATE_TEXT})"),
+        _normalize_date,
+    ),
+    (
+        "开标时间",
+        re.compile(rf"开标时间[^。；\n]{{0,36}}?({DATE_TEXT})"),
+        _normalize_date,
+    ),
+)
+
+
+def _normalize_qualification_name(value: str) -> str:
+    compact = re.sub(r"[\s（）()_-]", "", value).upper()
+    for standard in ("ISO9001", "ISO14001", "ISO45001", "CMMI", "ITSS"):
+        if standard in compact:
+            return standard
+    if "高新技术企业" in compact:
+        return "高新技术企业证书"
+    return re.sub(r"^(?:我司|本公司|公司|已|具备|持有|通过)+", "", compact)
+
+
+def _record_value(
+    values: dict[str, tuple[str, set[str]]],
+    normalized: str,
+    display: str,
+    source: str,
+) -> None:
+    if normalized in values:
+        values[normalized][1].add(source)
+    else:
+        values[normalized] = (display, {source})
+
+
+def _append_consistency_issue(
+    issues: list[ReviewIssue],
+    label: str,
+    values: dict[str, tuple[str, set[str]]],
+) -> None:
+    if len(values) <= 1:
+        return
+    detail = "；".join(
+        f"{display}（{'、'.join(sorted(sources))}）"
+        for display, sources in sorted(values.values(), key=lambda item: item[0])
+    )
+    issues.append(
+        _issue(
+            "高",
+            "跨章节一致性",
+            f"{label}出现不一致值：{detail}",
+            "回查招标文件、报价表和实施计划，统一所有章节中的承诺值。",
+        )
+    )
 
 
 def _issue(
@@ -203,21 +331,52 @@ def build_review_report(analysis: TenderAnalysis, drafts: list[ChapterDraft]) ->
             )
 
     for label, pattern in CONSISTENCY_PATTERNS.items():
-        values: dict[str, set[str]] = {}
+        values: dict[str, tuple[str, set[str]]] = {}
         for draft in drafts:
             for match in pattern.finditer(draft.markdown):
                 value = re.sub(r"\s+", "", match.group(1))
-                values.setdefault(value, set()).add(draft.title)
-        if len(values) > 1:
-            detail = "；".join(f"{value}（{'、'.join(sorted(titles))}）" for value, titles in sorted(values.items()))
-            issues.append(
-                _issue(
-                    "高",
-                    "跨章节一致性",
-                    f"{label}出现不一致值：{detail}",
-                    "回查招标文件和实施计划，统一所有章节中的承诺值。",
-                )
+                _record_value(values, value, value, draft.title)
+        _append_consistency_issue(issues, label, values)
+
+    for label, pattern, normalizer in LABELED_CONSISTENCY_PATTERNS:
+        values: dict[str, tuple[str, set[str]]] = {}
+        project_value = ""
+        if label == "项目预算/最高限价":
+            match = re.search(AMOUNT_TEXT, analysis.project_info.budget)
+            project_value = match.group(0) if match else ""
+        elif label == "投标截止时间":
+            match = re.search(DATE_TEXT, analysis.project_info.bid_deadline)
+            project_value = match.group(0) if match else ""
+        if project_value:
+            _record_value(values, normalizer(project_value), project_value.strip(), "项目基本信息")
+        for draft in drafts:
+            for match in pattern.finditer(draft.markdown):
+                display = re.sub(r"\s+", "", match.group(1))
+                _record_value(values, normalizer(display), display, draft.title)
+        _append_consistency_issue(issues, label, values)
+
+    personnel: dict[str, dict[str, tuple[str, set[str]]]] = {}
+    for draft in drafts:
+        for match in PERSONNEL_PATTERN.finditer(draft.markdown):
+            role = match.group("role")
+            count = match.group("count")
+            _record_value(personnel.setdefault(role, {}), count, f"{count}人", draft.title)
+    for role, values in personnel.items():
+        _append_consistency_issue(issues, f"{role}数量", values)
+
+    qualifications: dict[str, dict[str, tuple[str, set[str]]]] = {}
+    for draft in drafts:
+        for match in QUALIFICATION_EXPIRY_PATTERN.finditer(draft.markdown):
+            name = _normalize_qualification_name(match.group("name"))
+            display = re.sub(r"\s+", "", match.group("value"))
+            _record_value(
+                qualifications.setdefault(name, {}),
+                _normalize_date(display),
+                display,
+                draft.title,
             )
+    for name, values in qualifications.items():
+        _append_consistency_issue(issues, f"资质有效期（{name}）", values)
 
     if not drafts:
         issues.append(_issue("高", "章节完整性", "尚未生成任何章节草稿。", "完成章节计划并生成至少一个章节。"))

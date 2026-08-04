@@ -247,6 +247,17 @@ with st.sidebar.expander("项目管理", expanded=False):
         except ProjectArchiveError as exc:
             st.warning(str(exc))
 
+        if st.button(
+            "复制项目",
+            width="stretch",
+            key=f"duplicate_{current_id}",
+            help="复制源文件、分析、知识资料、草稿和复核状态，不复制旧 Word 与版本历史。",
+        ):
+            duplicate = store.duplicate_project(current_id)
+            st.session_state["project_id"] = duplicate["id"]
+            st.session_state["project_flash"] = f"已创建项目副本：{duplicate['name']}"
+            st.rerun()
+
         archive_label = "恢复项目" if managed_project["archived"] else "归档项目"
         if st.button(archive_label, width="stretch", key=f"archive_{current_id}"):
             store.set_project_archived(current_id, not bool(managed_project["archived"]))
@@ -271,6 +282,9 @@ if not current_id:
 
 project = store.get_project(current_id)
 st.title(project["name"])
+flash_message = st.session_state.pop("project_flash", None)
+if flash_message:
+    st.success(flash_message)
 status_label = PROJECT_STATUS_LABELS.get(project["status"], project["status"])
 st.markdown(
     f'<div class="status-note">项目状态：{status_label}。流程中的分析结果和正文均可人工修改。</div>',
@@ -340,6 +354,7 @@ with tab_analysis:
             with st.spinner("正在提取招标要求..."):
                 analysis = analyze_document(parsed, llm_client, use_llm=mode == "LLM 增强")
                 store.save_json(current_id, "analysis", analysis.model_dump())
+                store.delete_json(current_id, "review")
                 store.update_project(current_id, status="analysis_pending_confirmation")
             st.success("分析完成，请逐项确认")
             st.rerun()
@@ -380,6 +395,7 @@ with tab_analysis:
                 analysis.deadlines = deadlines
                 analysis.risks = risks
                 store.save_json(current_id, "analysis", analysis.model_dump())
+                store.delete_json(current_id, "review")
                 store.update_project(current_id, name=project_name or project["name"], status="analysis_confirmed")
                 st.success("确认结果已保存")
                 st.rerun()
@@ -456,6 +472,7 @@ with tab_generate:
         if st.button("保存章节计划", key=f"save_outline_{current_id}"):
             analysis.outline = edited_outline
             store.save_json(current_id, "analysis", analysis.model_dump())
+            store.delete_json(current_id, "review")
             st.success("章节计划已保存")
 
         generation_mode = st.radio(
@@ -486,7 +503,10 @@ with tab_generate:
                 )
                 drafts.append(draft)
                 progress.progress(index / len(selected_chapters), text=f"已完成：{plan.title}")
-            store.save_json(current_id, "drafts", [draft.model_dump() for draft in drafts])
+            generated_payload = [draft.model_dump() for draft in drafts]
+            store.save_json(current_id, "drafts", generated_payload)
+            store.save_draft_version(current_id, generated_payload, f"{generation_mode}生成")
+            store.delete_json(current_id, "review")
             store.update_project(current_id, status="draft_generated")
             st.success("章节草稿已生成")
             st.rerun()
@@ -516,8 +536,49 @@ with tab_generate:
                         )
                     )
             if st.button("保存正文修改", key=f"save_drafts_{current_id}"):
-                store.save_json(current_id, "drafts", [draft.model_dump() for draft in edited_drafts])
+                edited_payload = [draft.model_dump() for draft in edited_drafts]
+                store.save_json(current_id, "drafts", edited_payload)
+                store.save_draft_version(current_id, edited_payload, "人工保存")
+                store.delete_json(current_id, "review")
+                store.update_project(current_id, status="draft_generated")
                 st.success("正文修改已保存")
+
+            versions = store.list_draft_versions(current_id)
+            with st.expander(f"草稿版本记录（{len(versions)}）", expanded=False):
+                if not versions:
+                    st.caption("首次生成或保存正文后会自动建立版本快照。")
+                else:
+                    versions_by_id = {item["id"]: item for item in versions}
+
+                    def version_label(version_id: str) -> str:
+                        item = versions_by_id[version_id]
+                        created_at = item["created_at"].replace("T", " ").replace("+00:00", " UTC")
+                        return f"{created_at} | {item['reason']} | {item['draft_count']} 章"
+
+                    selected_version_id = st.selectbox(
+                        "选择草稿版本",
+                        list(versions_by_id),
+                        format_func=version_label,
+                        key=f"draft_version_{current_id}",
+                    )
+                    selected_version = store.load_draft_version(current_id, selected_version_id)
+                    chapter_names = [
+                        str(item.get("title", "未命名章节")) for item in selected_version["drafts"]
+                    ]
+                    st.caption("包含章节：" + "、".join(chapter_names))
+                    if st.button(
+                        "恢复此版本",
+                        key=f"restore_draft_version_{current_id}",
+                        help="恢复前会自动保存当前正文，已有复核报告将失效。",
+                    ):
+                        store.restore_draft_version(current_id, selected_version_id)
+                        key_prefix = f"draft_{current_id}_"
+                        for state_key in list(st.session_state):
+                            if str(state_key).startswith(key_prefix):
+                                del st.session_state[state_key]
+                        st.session_state["project_flash"] = "草稿版本已恢复，请重新生成复核报告。"
+                        st.rerun()
+                st.caption("每个项目最多保留最近 50 个草稿版本，完整备份会包含这些版本。")
 
 with tab_review:
     analysis = _load_analysis(store, current_id)

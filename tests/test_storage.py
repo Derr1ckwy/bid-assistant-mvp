@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
+from bid_assistant.storage import MAX_DRAFT_VERSIONS, ProjectArchiveError, ProjectStore, safe_filename
 
 
 def test_project_store_round_trip(tmp_path: Path) -> None:
@@ -74,6 +74,75 @@ def test_archive_and_restore_project(tmp_path: Path) -> None:
 
     store.set_project_archived(project["id"], False)
     assert store.list_projects()[0]["id"] == project["id"]
+
+
+def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("原项目")
+    project_id = project["id"]
+    store.save_source(project_id, "招标文件.txt", b"tender")
+    store.save_json(project_id, "analysis", {"ok": True})
+    store.save_json(project_id, "drafts", [{"title": "第一版"}])
+    store.save_json(project_id, "review", {"issues": []})
+    store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
+    store.save_draft_version(project_id, [{"title": "第一版"}], "首次保存")
+    store.output_path(project_id, "旧初稿.docx").write_bytes(b"docx")
+    store.update_project(project_id, status="exported")
+
+    duplicate = store.duplicate_project(project_id)
+
+    assert duplicate["id"] != project_id
+    assert duplicate["name"] == "原项目（副本）"
+    assert duplicate["status"] == "review_generated"
+    assert duplicate["archived"] == 0
+    assert store.load_json(duplicate["id"], "analysis") == {"ok": True}
+    assert store.load_json(duplicate["id"], "drafts") == [{"title": "第一版"}]
+    assert store.list_knowledge_files(duplicate["id"])["company"][0].read_bytes() == b"company"
+    assert not (store.project_dir(duplicate["id"]) / "output").exists()
+    assert store.list_draft_versions(duplicate["id"]) == []
+
+
+def test_draft_versions_can_be_listed_and_restored(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("版本测试")
+    project_id = project["id"]
+    first_drafts = [{"chapter_id": "a", "title": "第一章", "markdown": "第一版"}]
+    second_drafts = [{"chapter_id": "a", "title": "第一章", "markdown": "第二版"}]
+
+    store.save_json(project_id, "drafts", first_drafts)
+    first_version = store.save_draft_version(project_id, first_drafts, "首次生成")
+    store.save_json(project_id, "drafts", second_drafts)
+    store.save_draft_version(project_id, second_drafts, "人工修改")
+    store.save_json(project_id, "review", {"issues": [{"message": "旧复核"}]})
+
+    versions = store.list_draft_versions(project_id)
+    restored = store.restore_draft_version(project_id, first_version["id"])
+
+    assert len(versions) == 2
+    assert versions[0]["reason"] == "人工修改"
+    assert restored == first_drafts
+    assert store.load_json(project_id, "drafts") == first_drafts
+    assert store.load_json(project_id, "review") is None
+    assert len(store.list_draft_versions(project_id)) == 3
+    assert any(item["reason"] == "恢复版本前自动快照" for item in store.list_draft_versions(project_id))
+
+    with pytest.raises(ValueError):
+        store.load_draft_version(project_id, "../bad")
+
+
+def test_draft_version_retention_keeps_latest_versions(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("版本上限测试")
+    drafts = [{"chapter_id": "a", "title": "第一章", "markdown": "正文"}]
+
+    for index in range(MAX_DRAFT_VERSIONS + 2):
+        store.save_draft_version(project["id"], drafts, f"版本 {index}")
+
+    versions = store.list_draft_versions(project["id"])
+
+    assert len(versions) == MAX_DRAFT_VERSIONS
+    assert versions[0]["reason"] == f"版本 {MAX_DRAFT_VERSIONS + 1}"
+    assert all(item["reason"] != "版本 0" for item in versions)
 
 
 def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
