@@ -8,6 +8,7 @@ import streamlit as st
 
 from bid_assistant.analyzer import analyze_document
 from bid_assistant.config import settings
+from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
 from bid_assistant.exporter import export_docx
 from bid_assistant.generator import generate_chapter
 from bid_assistant.knowledge import search_knowledge
@@ -224,6 +225,30 @@ def _verify_package_cached(
 ) -> dict:
     del file_size, modified_ns
     return verify_submission_package(path_value, expected_sha256=expected_sha256)
+
+
+@st.cache_data(show_spinner=False)
+def _verify_docx_cached(
+    path_value: str,
+    expected_sha256: str,
+    expected_chapter_count: int,
+    file_size: int,
+    modified_ns: int,
+) -> dict:
+    del file_size, modified_ns
+    return verify_docx_output(
+        path_value,
+        expected_sha256=expected_sha256,
+        expected_chapter_count=expected_chapter_count,
+    )
+
+
+def _docx_file_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return -1, -1
+    return stat.st_size, stat.st_mtime_ns
 
 
 store = get_store()
@@ -824,15 +849,68 @@ with tab_export:
                 key=f"export_version_{current_id}",
             )
             selected_version = version_by_id[selected_version_id]
-            st.download_button(
+            word_size, word_modified_ns = _docx_file_signature(selected_version["path"])
+            word_quality = _verify_docx_cached(
+                str(selected_version["path"]),
+                selected_version["sha256"],
+                selected_version["chapter_count"],
+                word_size,
+                word_modified_ns,
+            )
+            if word_quality["valid"]:
+                if word_quality["warnings"]:
+                    st.warning(
+                        f"Word 文件完整，但有 {len(word_quality['warnings'])} 个版式或内容提示项。"
+                    )
+                else:
+                    st.success(
+                        f"Word 成品质检通过：{word_quality['chapter_count']} 个正文章节，"
+                        f"{word_quality['table_count']} 个表格。"
+                    )
+            else:
+                st.error("Word 成品质检不通过，已停止该版本下载。")
+                st.dataframe(
+                    [{"issue": item} for item in word_quality["errors"]],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={"issue": st.column_config.TextColumn("质检错误", width="large")},
+                )
+            if word_quality["warnings"]:
+                with st.expander(f"查看质检提示（{len(word_quality['warnings'])}）"):
+                    st.dataframe(
+                        [{"issue": item} for item in word_quality["warnings"]],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={"issue": st.column_config.TextColumn("提示项", width="large")},
+                    )
+
+            quality_report = build_docx_quality_report(
+                word_quality,
+                word_version=selected_version,
+            )
+            word_download_columns = st.columns([1, 1, 3])
+            word_download_columns[0].download_button(
                 "下载所选 Word",
-                data=selected_version["path"].read_bytes(),
+                data=selected_version["path"].read_bytes() if word_quality["valid"] else b"",
                 file_name=selected_version["filename"],
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                disabled=not word_quality["valid"],
                 width="stretch",
                 icon=":material/download:",
             )
-            st.caption(str(selected_version["path"]))
+            word_download_columns[1].download_button(
+                "下载质检报告",
+                data=quality_report,
+                file_name=safe_filename(f"{Path(selected_version['filename']).stem}_质检报告.txt"),
+                mime="text/plain;charset=utf-8",
+                width="stretch",
+                icon=":material/fact_check:",
+            )
+            st.caption(
+                f"实际 SHA-256：{word_quality['sha256']} · "
+                f"{word_quality['size'] / 1024 / 1024:.2f} MB · "
+                f"质检时间：{word_quality['verified_at'].replace('T', ' ').replace('+00:00', ' UTC')}"
+            )
         else:
             st.caption("尚未生成 Word 版本。")
 
@@ -1045,6 +1123,7 @@ with tab_submission:
     st.markdown("#### 提交包")
     export_versions = store.list_export_versions(current_id)
     selected_word_version = None
+    selected_word_quality = None
     if export_versions:
         word_version_by_id = {item["id"]: item for item in export_versions}
         selected_word_id = st.selectbox(
@@ -1057,6 +1136,16 @@ with tab_submission:
             key=f"package_word_version_{current_id}",
         )
         selected_word_version = word_version_by_id[selected_word_id]
+        selected_word_size, selected_word_modified_ns = _docx_file_signature(
+            selected_word_version["path"]
+        )
+        selected_word_quality = _verify_docx_cached(
+            str(selected_word_version["path"]),
+            selected_word_version["sha256"],
+            selected_word_version["chapter_count"],
+            selected_word_size,
+            selected_word_modified_ns,
+        )
     else:
         st.info("请先在“6. Word 导出”中生成至少一个 Word 版本。")
 
@@ -1071,6 +1160,7 @@ with tab_submission:
         current_attachment_refs,
         review,
         has_unsaved_changes=has_unsaved_changes,
+        word_quality=selected_word_quality,
     )
     package_status_labels = {"pass": "通过", "warning": "需确认", "block": "不可打包"}
     st.dataframe(

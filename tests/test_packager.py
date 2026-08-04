@@ -104,6 +104,33 @@ def test_package_readiness_allows_internal_review_after_warning_confirmation(tmp
     assert readiness["high_risk"] == 1
 
 
+def test_package_readiness_uses_word_quality_as_block_or_warning(tmp_path: Path) -> None:
+    word_path = tmp_path / "投标文件_V001.docx"
+    word_path.write_bytes(b"docx")
+    items = [SubmissionItem(name="营业执照", status="已备妥")]
+
+    blocked = build_package_readiness(
+        _word_version(word_path),
+        items,
+        set(),
+        ReviewReport(),
+        word_quality={"valid": False, "errors": ["文件损坏"], "warnings": []},
+    )
+    warned = build_package_readiness(
+        _word_version(word_path),
+        items,
+        set(),
+        ReviewReport(),
+        word_quality={"valid": True, "errors": [], "warnings": ["存在占位符"]},
+    )
+
+    assert blocked["can_package"] is False
+    assert any(item["key"] == "word_quality" and item["status"] == "block" for item in blocked["checks"])
+    assert warned["can_package"] is True
+    assert warned["requires_confirmation"] is True
+    assert any(item["key"] == "word_quality" and item["status"] == "warning" for item in warned["checks"])
+
+
 def test_submission_package_contains_manifest_checksums_and_chinese_checklist(tmp_path: Path) -> None:
     word_path = tmp_path / "项目投标文件_V003.docx"
     word_path.write_bytes(b"word-content")

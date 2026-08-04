@@ -29,6 +29,7 @@ def build_package_readiness(
     review: ReviewReport | None,
     *,
     has_unsaved_changes: bool = False,
+    word_quality: dict | None = None,
 ) -> dict:
     summary = summarize_submission_items(items, attachment_refs)
     checks = [
@@ -75,6 +76,26 @@ def build_package_readiness(
             ),
         },
     ]
+
+    if word_version and word_quality is not None:
+        quality_warnings = len(word_quality.get("warnings") or [])
+        if not word_quality.get("valid"):
+            quality_status = "block"
+            quality_detail = f"Word 成品质检发现 {len(word_quality.get('errors') or [])} 个阻断问题。"
+        elif quality_warnings:
+            quality_status = "warning"
+            quality_detail = f"Word 文件完整，但仍有 {quality_warnings} 个版式或内容提示项。"
+        else:
+            quality_status = "pass"
+            quality_detail = "Word 文件完整，系统标准版式结构检查通过。"
+        checks.append(
+            {
+                "key": "word_quality",
+                "label": "Word 成品质检",
+                "status": quality_status,
+                "detail": quality_detail,
+            }
+        )
 
     if review is None:
         review_status = "warning"
