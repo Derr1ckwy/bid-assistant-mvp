@@ -200,6 +200,28 @@ def _load_analysis(store: ProjectStore, project_id: str) -> TenderAnalysis | Non
     return TenderAnalysis.model_validate(payload) if payload else None
 
 
+def _sync_analysis_editor_state(project_id: str, analysis: TenderAnalysis) -> None:
+    field_values = {
+        f"info_name_{project_id}": analysis.project_info.project_name,
+        f"info_purchaser_{project_id}": analysis.project_info.purchaser,
+        f"info_agency_{project_id}": analysis.project_info.agency,
+        f"info_budget_{project_id}": analysis.project_info.budget,
+        f"info_deadline_{project_id}": analysis.project_info.bid_deadline,
+    }
+    for key, value in field_values.items():
+        st.session_state[key] = value
+
+    for prefix in (
+        "mandatory",
+        "scoring",
+        "qualification",
+        "documents",
+        "deadlines",
+        "risks",
+    ):
+        st.session_state.pop(f"{prefix}_{project_id}", None)
+
+
 def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
     payload = store.load_json(project_id, "review")
     return ReviewReport.model_validate(payload) if payload else None
@@ -498,6 +520,7 @@ with tab_analysis:
                 store.delete_json(current_id, "analysis_acceptance")
                 store.delete_json(current_id, "review")
                 store.update_project(current_id, status="analysis_pending_confirmation")
+                _sync_analysis_editor_state(current_id, analysis)
             st.success("分析完成，请逐项确认")
             st.rerun()
 
@@ -508,11 +531,37 @@ with tab_analysis:
             st.caption(f"分析模式：{analysis.analysis_mode}")
             st.subheader("项目基本信息")
             info_columns = st.columns(2)
-            project_name = info_columns[0].text_input("项目名称", analysis.project_info.project_name, key=f"info_name_{current_id}")
-            purchaser = info_columns[1].text_input("招标人/采购人", analysis.project_info.purchaser, key=f"info_purchaser_{current_id}")
-            agency = info_columns[0].text_input("代理机构", analysis.project_info.agency, key=f"info_agency_{current_id}")
-            budget = info_columns[1].text_input("预算/最高限价", analysis.project_info.budget, key=f"info_budget_{current_id}")
-            deadline = st.text_input("投标截止时间", analysis.project_info.bid_deadline, key=f"info_deadline_{current_id}")
+            source_help = "仅根据招标文件原文填入；原文未明确出现时保持为空，需人工补充确认。"
+            project_name = info_columns[0].text_input(
+                "项目名称",
+                analysis.project_info.project_name,
+                key=f"info_name_{current_id}",
+                help=source_help,
+            )
+            purchaser = info_columns[1].text_input(
+                "招标人/采购人",
+                analysis.project_info.purchaser,
+                key=f"info_purchaser_{current_id}",
+                help=source_help,
+            )
+            agency = info_columns[0].text_input(
+                "代理机构",
+                analysis.project_info.agency,
+                key=f"info_agency_{current_id}",
+                help=source_help,
+            )
+            budget = info_columns[1].text_input(
+                "预算/最高限价",
+                analysis.project_info.budget,
+                key=f"info_budget_{current_id}",
+                help=source_help,
+            )
+            deadline = st.text_input(
+                "投标截止时间",
+                analysis.project_info.bid_deadline,
+                key=f"info_deadline_{current_id}",
+                help=source_help,
+            )
 
             mandatory = _requirement_editor("强制要求", analysis.mandatory_requirements, f"mandatory_{current_id}")
             scoring = _scoring_editor(analysis.scoring_items, f"scoring_{current_id}")
