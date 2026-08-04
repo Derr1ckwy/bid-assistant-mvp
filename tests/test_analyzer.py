@@ -93,3 +93,49 @@ def test_llm_analysis_splits_and_merges_long_document() -> None:
     assert len(analysis.mandatory_requirements) == 1
     assert len(analysis.scoring_items) == 1
     assert any("分 2 段分析" in warning for warning in analysis.warnings)
+
+
+class LooseTypeClient:
+    def chat_json(self, messages: list[dict[str, str]]) -> dict:
+        return {
+            "project_info": {"project_name": "结构化输出兼容测试"},
+            "mandatory_requirements": [
+                {
+                    "content": "投标人必须提交营业执照。",
+                    "source_page": "第 1 页",
+                    "source_quote": "投标人必须提交营业执照。",
+                    "confidence": "高",
+                    "status": "确认",
+                }
+            ],
+            "scoring_items": [
+                {
+                    "criterion": "技术方案评分 30 分。",
+                    "points": 30,
+                    "source_page": "1",
+                    "source_quote": "技术方案评分 30 分。",
+                    "confidence": "80%",
+                    "status": "待确认",
+                }
+            ],
+        }
+
+
+def test_llm_analysis_normalizes_common_small_model_types() -> None:
+    text = "投标人必须提交营业执照。\n技术方案评分 30 分。"
+    document = ParsedDocument(
+        filename="loose-types.txt",
+        file_type="txt",
+        pages=[ParsedPage(page_number=1, text=text)],
+        full_text=text,
+        char_count=len(text),
+    )
+
+    analysis = analyze_document(document, LooseTypeClient(), use_llm=True)
+
+    assert analysis.analysis_mode == "llm"
+    assert analysis.mandatory_requirements[0].confidence == 0.9
+    assert analysis.mandatory_requirements[0].status == "待确认"
+    assert analysis.mandatory_requirements[0].source_page == 1
+    assert analysis.scoring_items[0].points == "30"
+    assert analysis.scoring_items[0].confidence == 0.8

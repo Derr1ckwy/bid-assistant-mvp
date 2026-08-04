@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import mimetypes
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
@@ -9,7 +10,7 @@ import streamlit as st
 
 from bid_assistant.acceptance import build_acceptance_report, build_analysis_acceptance
 from bid_assistant.analyzer import analyze_document
-from bid_assistant.config import settings
+from bid_assistant.config import Settings, save_llm_settings, settings
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
 from bid_assistant.exporter import export_docx
 from bid_assistant.generator import generate_chapter
@@ -86,8 +87,8 @@ def get_store() -> ProjectStore:
 
 
 @st.cache_resource
-def get_llm_client() -> OpenAICompatibleClient:
-    return OpenAICompatibleClient(settings)
+def get_llm_client(runtime_settings: Settings) -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(runtime_settings)
 
 
 def _clean_value(value, default=""):
@@ -258,8 +259,17 @@ def _docx_file_signature(path: Path) -> tuple[int, int]:
     return stat.st_size, stat.st_mtime_ns
 
 
+runtime_settings = replace(
+    settings,
+    llm_base_url=str(st.session_state.get("llm_base_url_input", settings.llm_base_url)).rstrip("/"),
+    llm_api_key=str(st.session_state.get("llm_api_key_input", settings.llm_api_key)),
+    llm_model=str(st.session_state.get("llm_model_input", settings.llm_model)),
+    llm_timeout_seconds=int(st.session_state.get("llm_timeout_input", settings.llm_timeout_seconds)),
+    llm_chunk_chars=int(st.session_state.get("llm_chunk_chars_input", settings.llm_chunk_chars)),
+    llm_max_chunks=int(st.session_state.get("llm_max_chunks_input", settings.llm_max_chunks)),
+)
 store = get_store()
-llm_client = get_llm_client()
+llm_client = get_llm_client(runtime_settings)
 
 st.sidebar.title("投标项目")
 new_name = st.sidebar.text_input("新项目名称", placeholder="例如：某某信息化项目")
@@ -339,12 +349,48 @@ with st.sidebar.expander("项目管理", expanded=False):
             st.rerun()
 
 with st.sidebar.expander("模型配置", expanded=False):
-    st.code(f"{settings.llm_model}\n{settings.llm_base_url}")
-    if st.button("检测模型连接", width="stretch"):
-        if llm_client.is_available():
-            st.success("模型接口可用")
+    st.text_input("接口地址", value=settings.llm_base_url, key="llm_base_url_input")
+    st.text_input("模型名称", value=settings.llm_model, key="llm_model_input")
+    st.text_input("API Key", value=settings.llm_api_key, type="password", key="llm_api_key_input")
+    parameter_columns = st.columns(2)
+    parameter_columns[0].number_input(
+        "分段字符数",
+        min_value=4000,
+        max_value=40000,
+        step=1000,
+        value=settings.llm_chunk_chars,
+        key="llm_chunk_chars_input",
+    )
+    parameter_columns[1].number_input(
+        "最多分段",
+        min_value=1,
+        max_value=20,
+        step=1,
+        value=settings.llm_max_chunks,
+        key="llm_max_chunks_input",
+    )
+    st.number_input(
+        "请求超时（秒）",
+        min_value=30,
+        max_value=600,
+        step=30,
+        value=settings.llm_timeout_seconds,
+        key="llm_timeout_input",
+    )
+    action_columns = st.columns(2)
+    if action_columns[0].button("检测连接", width="stretch", key="check_llm_connection"):
+        health = llm_client.check_health()
+        if health.available:
+            st.success(health.message)
         else:
-            st.warning("模型不可用，系统仍可使用规则模式")
+            st.error(health.message)
+    if action_columns[1].button("保存配置", width="stretch", key="save_llm_configuration"):
+        save_llm_settings(runtime_settings)
+        st.success("模型配置已保存到本机 .env，当前会话立即生效。")
+    if "localhost:11434" in runtime_settings.llm_base_url:
+        st.caption(f"本地模式需要 Ollama 服务，并已下载模型：{runtime_settings.llm_model}")
+    else:
+        st.caption("云端 API Key 仅保存在本机 .env，不进入 Git 或项目备份。")
 
 st.sidebar.caption("当前版本只生成可复核初稿，不替代投标负责人审核。")
 
@@ -436,7 +482,12 @@ with tab_analysis:
         )
         if st.button("开始分析", type="primary", key=f"analyze_{current_id}"):
             with st.spinner("正在提取招标要求..."):
-                analysis = analyze_document(parsed, llm_client, use_llm=mode == "LLM 增强")
+                llm_requested = mode == "LLM 增强"
+                health = llm_client.check_health() if llm_requested else None
+                llm_ready = bool(health and health.available)
+                analysis = analyze_document(parsed, llm_client, use_llm=llm_ready)
+                if llm_requested and health and not health.available:
+                    analysis.warnings.insert(0, f"未调用 LLM：{health.message} 已使用规则模式。")
                 store.save_json(current_id, "analysis", analysis.model_dump())
                 store.save_json(current_id, "analysis_baseline", analysis.model_dump())
                 store.save_json(
@@ -751,6 +802,11 @@ with tab_generate:
             files_by_category = store.list_knowledge_files(current_id)
             drafts: list[ChapterDraft] = []
             progress = st.progress(0, text="准备生成")
+            llm_requested = generation_mode == "LLM 生成"
+            health = llm_client.check_health() if llm_requested else None
+            llm_ready = bool(health and health.available)
+            if llm_requested and health and not health.available:
+                st.warning(f"未调用 LLM：{health.message} 本次自动使用规则草稿。")
             for index, plan in enumerate(selected_chapters, start=1):
                 query = f"{plan.title}\n{plan.instructions}"
                 evidence = search_knowledge(query, files_by_category)
@@ -759,13 +815,14 @@ with tab_generate:
                     analysis,
                     evidence,
                     llm_client,
-                    use_llm=generation_mode == "LLM 生成",
+                    use_llm=llm_ready,
                 )
                 drafts.append(draft)
                 progress.progress(index / len(selected_chapters), text=f"已完成：{plan.title}")
             generated_payload = [draft.model_dump() for draft in drafts]
             store.save_json(current_id, "drafts", generated_payload)
-            store.save_draft_version(current_id, generated_payload, f"{generation_mode}生成")
+            version_label = generation_mode if llm_ready or not llm_requested else "LLM 不可用，规则回退"
+            store.save_draft_version(current_id, generated_payload, f"{version_label}生成")
             store.delete_json(current_id, "review")
             store.update_project(current_id, status="draft_generated")
             st.success("章节草稿已生成")

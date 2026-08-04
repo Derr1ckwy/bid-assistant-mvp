@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -209,12 +210,74 @@ risks: 数组，格式同 mandatory_requirements
 要求：
 1. source_quote 必须是招标文件中的短原文。
 2. source_page 使用数字；无法确定时为 null。
-3. status 固定为“待确认”。
+3. status 固定为“待确认”；confidence 必须是 0.0 到 1.0 之间的数字，禁止使用“高、中、低”等文字。
 4. 不生成目录，由系统后续处理。
+5. 原文存在的信息必须提取，不能因为字段分类重叠而省略；同一句原文可以进入多个相关数组。
+6. project_name 提取“项目名称、采购项目名称、招标项目名称”后的内容；purchaser 提取“采购人、招标人”后的内容。
+7. 出现“必须、须、应、不得、无效、废标”时检查 mandatory_requirements；出现“评分、得分、分值、分”时检查 scoring_items。
+8. 出现“资格、资质、营业执照、业绩、证书”时检查 qualification_requirements；出现“提供、提交、附、证明材料”时检查 required_documents。
+9. 日期、时间、截止、开标、递交等内容进入 deadlines；无效、否决、废标、拒收、取消资格等后果进入 risks。
+10. 即使 project_info 已有内容，也必须继续检查并填写所有数组。只输出 JSON，不要解释提取过程。
 
 招标文件：
 {text}
 """
+
+
+def _normalize_confidence(value: Any) -> float:
+    if isinstance(value, str):
+        labels = {"高": 0.9, "中": 0.7, "低": 0.5}
+        cleaned = value.strip()
+        if cleaned in labels:
+            return labels[cleaned]
+        try:
+            number = float(cleaned.rstrip("%"))
+            value = number / 100 if cleaned.endswith("%") else number
+        except ValueError:
+            return 0.6
+    if isinstance(value, (int, float)):
+        return max(0.0, min(1.0, float(value)))
+    return 0.6
+
+
+def _normalize_llm_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+    project_info = normalized.get("project_info")
+    if isinstance(project_info, dict):
+        normalized["project_info"] = {
+            key: "" if value is None else str(value)
+            for key, value in project_info.items()
+        }
+
+    item_groups = (
+        "mandatory_requirements",
+        "qualification_requirements",
+        "required_documents",
+        "deadlines",
+        "risks",
+        "scoring_items",
+    )
+    for group_name in item_groups:
+        items = normalized.get(group_name)
+        if not isinstance(items, list):
+            continue
+        clean_items: list[dict[str, Any]] = []
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            item["confidence"] = _normalize_confidence(item.get("confidence"))
+            if item.get("status") not in {"待确认", "已确认", "忽略", "待核对"}:
+                item["status"] = "待确认"
+            page = item.get("source_page")
+            if isinstance(page, str):
+                match = re.search(r"\d+", page)
+                item["source_page"] = int(match.group()) if match else None
+            if group_name == "scoring_items" and item.get("points") is not None:
+                item["points"] = str(item["points"])
+            clean_items.append(item)
+        normalized[group_name] = clean_items
+    return normalized
 
 
 def _merge_project_info(items: list[ProjectInfo]) -> ProjectInfo:
@@ -282,13 +345,15 @@ def analyze_document(
         return analyze_with_rules(document)
 
     try:
-        all_chunks = _document_chunks(document)
+        chunk_chars = max(4000, getattr(client, "chunk_chars", LLM_CHUNK_CHARS))
+        max_chunks = max(1, getattr(client, "max_chunks", LLM_MAX_CHUNKS))
+        all_chunks = _document_chunks(document, max_chars=chunk_chars)
         if not all_chunks:
             fallback = analyze_with_rules(document)
             fallback.warnings.append("没有可提交给 LLM 的文本，已使用规则模式。")
             return fallback
 
-        chunks = all_chunks[:LLM_MAX_CHUNKS]
+        chunks = all_chunks[:max_chunks]
         partial_analyses: list[TenderAnalysis] = []
         failed_chunks: list[str] = []
         for index, text in enumerate(chunks, start=1):
@@ -296,7 +361,7 @@ def analyze_document(
                 payload = client.chat_json(
                     [{"role": "user", "content": _analysis_prompt(text, index, len(chunks))}]
                 )
-                partial_analyses.append(TenderAnalysis.model_validate(payload))
+                partial_analyses.append(TenderAnalysis.model_validate(_normalize_llm_payload(payload)))
             except (LLMError, ValidationError, TypeError, ValueError) as exc:
                 failed_chunks.append(f"第 {index} 段失败：{exc}")
 
@@ -307,9 +372,9 @@ def analyze_document(
         mode = "llm_chunked" if len(chunks) > 1 else "llm"
         if len(chunks) > 1:
             warnings.append(f"LLM 已分 {len(chunks)} 段分析并合并结果。")
-        if len(all_chunks) > LLM_MAX_CHUNKS:
+        if len(all_chunks) > max_chunks:
             warnings.append(
-                f"文档共 {len(all_chunks)} 个分析分段，本次只处理前 {LLM_MAX_CHUNKS} 段，请人工检查后续内容。"
+                f"文档共 {len(all_chunks)} 个分析分段，本次只处理前 {max_chunks} 段，请人工检查后续内容。"
             )
         if failed_chunks:
             warnings.append("部分 LLM 分段失败，已保留成功结果：" + "；".join(failed_chunks))

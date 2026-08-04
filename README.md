@@ -49,7 +49,31 @@ Copy-Item .env.example .env
 
 浏览器访问 `http://127.0.0.1:8501`。
 
-不配置模型也可以使用规则模式。需要 LLM 时，在 `.env` 中填写 OpenAI 兼容接口；默认示例指向本机 Ollama。
+不配置模型也可以使用规则模式。需要 LLM 时，可直接在左侧“模型配置”中填写 OpenAI 兼容接口、模型名称和 API Key，检测连接后保存到本机 `.env`。
+
+## 模型配置
+
+默认配置面向 16GB 内存和 8GB 显存的当前单机环境：
+
+```text
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen3:4b
+LLM_CHUNK_CHARS=12000
+LLM_MAX_CHUNKS=12
+```
+
+当前电脑已采用 Windows 原生 `llama.cpp` Vulkan 后端，不依赖 Ollama、Docker 或 WSL。首次重建环境时执行：
+
+```powershell
+.\setup_local_llm.ps1
+.\start_local_llm.ps1
+```
+
+安装脚本通过国内 GitHub 代理下载 `llama.cpp` Windows Vulkan 运行时，并从 ModelScope 下载官方 `Qwen3-4B-Q4_K_M.gguf`，下载支持断点续传且会校验官方 SHA-256。模型和运行时分别位于 `models/`、`runtime/`，均被 Git 忽略。
+
+`run.ps1` 会优先自动启动本地 `llama-server`，继续使用 `http://localhost:11434/v1`、模型别名 `qwen3:4b` 和本地 API Key `ollama`；服务只监听本机地址并限制浏览器来源。本地文件不存在时才尝试已有 Ollama。可用 `.\stop_local_llm.ps1` 停止由项目管理的模型进程。也可以改用任意 OpenAI 兼容云端接口；API Key 仅保存在被 Git 忽略的 `.env` 中，不进入项目备份。
+
+模型健康检查会区分服务未启动、连接超时、鉴权失败、模型未下载和接口响应异常。选择 LLM 分析或生成时，若预检失败会立即切换到规则模式，不再等待完整请求超时。
 
 ## 项目备份
 
