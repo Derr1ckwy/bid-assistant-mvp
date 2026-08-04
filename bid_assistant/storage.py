@@ -13,7 +13,7 @@ def _now() -> str:
 
 
 def safe_filename(value: str) -> str:
-    name = Path(value or "file").name
+    name = re.split(r"[\\/]", value or "file")[-1]
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
     return name[:180] or "file"
 

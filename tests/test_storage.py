@@ -32,3 +32,4 @@ def test_store_rejects_invalid_identifiers(tmp_path: Path) -> None:
 
 def test_safe_filename_removes_path_and_windows_characters() -> None:
     assert safe_filename("..\\folder\\bad?.txt") == "bad_.txt"
+    assert safe_filename("../folder/bad?.txt") == "bad_.txt"
