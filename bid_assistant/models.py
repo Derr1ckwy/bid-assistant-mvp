@@ -104,6 +104,18 @@ class ReviewReport(BaseModel):
         return sum(item.status == "待处理" for item in self.issues)
 
 
+class SubmissionItem(BaseModel):
+    id: str = Field(default_factory=lambda: make_id("submit"))
+    category: str = "商务文件"
+    name: str
+    source_requirement_id: str = ""
+    source_page: int | None = None
+    required: bool = True
+    status: Literal["待准备", "已备妥", "不适用"] = "待准备"
+    attachment: str = ""
+    note: str = ""
+
+
 class TenderAnalysis(BaseModel):
     project_info: ProjectInfo = Field(default_factory=ProjectInfo)
     mandatory_requirements: list[RequirementItem] = Field(default_factory=list)

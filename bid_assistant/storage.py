@@ -21,6 +21,7 @@ MAX_ARCHIVE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_DRAFT_VERSIONS = 50
 MAX_EXPORT_VERSIONS = 50
+ATTACHMENT_CATEGORIES = {"qualification", "business", "technical", "pricing", "signature", "other"}
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
 _DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
@@ -179,7 +180,9 @@ class ProjectStore:
         try:
             for path in source.rglob("*"):
                 relative = path.relative_to(source)
-                if relative.parts[0] in {"output", "versions"}:
+                if relative.parts[0] in {"output", "versions", "attachments"}:
+                    continue
+                if relative.as_posix() == "submission_checklist.json":
                     continue
                 if path.is_symlink():
                     raise ValueError("项目目录包含符号链接，无法安全复制")
@@ -350,6 +353,48 @@ class ProjectStore:
                 result[category] = sorted(path for path in category_dir.iterdir() if path.is_file())
         return result
 
+    def save_attachment_file(self, project_id: str, category: str, filename: str, content: bytes) -> Path:
+        if category not in ATTACHMENT_CATEGORIES:
+            raise ValueError("Invalid attachment category")
+        target_dir = self.project_dir(project_id) / "attachments" / category
+        target_dir.mkdir(parents=True, exist_ok=True)
+        sanitized = safe_filename(filename)
+        target = target_dir / sanitized
+        stem = Path(sanitized).stem[:150] or "attachment"
+        suffix = Path(sanitized).suffix
+        counter = 2
+        while target.exists():
+            target = target_dir / safe_filename(f"{stem} ({counter}){suffix}")
+            counter += 1
+        target.write_bytes(content)
+        return target
+
+    def list_attachment_files(self, project_id: str) -> dict[str, list[Path]]:
+        result = {category: [] for category in sorted(ATTACHMENT_CATEGORIES)}
+        base = self.project_dir(project_id) / "attachments"
+        for category in result:
+            category_dir = base / category
+            if category_dir.exists():
+                result[category] = sorted(path for path in category_dir.iterdir() if path.is_file())
+        return result
+
+    def attachment_path(self, project_id: str, reference: str) -> Path | None:
+        parts = reference.split("/")
+        if len(parts) != 2 or parts[0] not in ATTACHMENT_CATEGORIES:
+            return None
+        filename = parts[1]
+        if filename != safe_filename(filename):
+            return None
+        path = self.project_dir(project_id) / "attachments" / parts[0] / filename
+        return path if path.is_file() else None
+
+    def delete_attachment_file(self, project_id: str, reference: str) -> bool:
+        path = self.attachment_path(project_id, reference)
+        if path is None:
+            return False
+        path.unlink()
+        return True
+
     def output_path(self, project_id: str, filename: str) -> Path:
         output_dir = self.project_dir(project_id) / "output"
         output_dir.mkdir(exist_ok=True)
@@ -471,6 +516,16 @@ class ProjectStore:
         project_path = self.project_dir(project_id)
         source_ready = self.source_path(project_id) is not None
         drafts = self.load_json(project_id, "drafts", [])
+        checklist_payload = self.load_json(project_id, "submission_checklist", [])
+        checklist_items = [
+            item
+            for item in checklist_payload
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        ]
+        checklist_complete = bool(checklist_items) and all(
+            not bool(item.get("required", True)) or item.get("status") in {"已备妥", "不适用"}
+            for item in checklist_items
+        )
         output_dir = project_path / "output"
         steps = [
             {"key": "source", "label": "招标文件", "complete": source_ready},
@@ -484,15 +539,18 @@ class ProjectStore:
                 "complete": output_dir.is_dir()
                 and any(path.is_file() and path.suffix.lower() == ".docx" for path in output_dir.iterdir()),
             },
+            {"key": "submission", "label": "提交清单", "complete": checklist_complete},
         ]
         completed = sum(bool(step["complete"]) for step in steps)
         knowledge_count = sum(len(paths) for paths in self.list_knowledge_files(project_id).values())
+        attachment_count = sum(len(paths) for paths in self.list_attachment_files(project_id).values())
         return {
             "steps": steps,
             "completed": completed,
             "total": len(steps),
             "percent": round(completed / len(steps) * 100),
             "knowledge_files": knowledge_count,
+            "attachment_files": attachment_count,
         }
 
     def export_project_archive(self, project_id: str) -> bytes:

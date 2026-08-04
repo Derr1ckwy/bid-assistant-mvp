@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 import pandas as pd
@@ -20,11 +21,13 @@ from bid_assistant.models import (
     ReviewIssue,
     ReviewReport,
     ScoringItem,
+    SubmissionItem,
     TenderAnalysis,
 )
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
 from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
+from bid_assistant.submission import SUBMISSION_CATEGORIES, summarize_submission_items, sync_submission_items
 
 
 st.set_page_config(page_title="投标初稿助手", page_icon="📄", layout="wide")
@@ -48,6 +51,15 @@ CATEGORY_LABELS = {
 }
 STATUS_OPTIONS = ["待确认", "已确认", "忽略", "待核对"]
 REVIEW_STATUS_OPTIONS = ["待处理", "已处理", "忽略"]
+SUBMISSION_STATUS_OPTIONS = ["待准备", "已备妥", "不适用"]
+ATTACHMENT_CATEGORY_LABELS = {
+    "qualification": "资格文件",
+    "business": "商务文件",
+    "technical": "技术文件",
+    "pricing": "报价文件",
+    "signature": "签章与装订",
+    "other": "其他附件",
+}
 PROJECT_STATUS_LABELS = {
     "new": "新建",
     "uploaded": "已上传",
@@ -185,6 +197,20 @@ def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
     return ReviewReport.model_validate(payload) if payload else None
 
 
+def _load_submission_items(store: ProjectStore, project_id: str) -> list[SubmissionItem]:
+    payload = store.load_json(project_id, "submission_checklist", [])
+    return [SubmissionItem.model_validate(item) for item in payload]
+
+
+def _submission_rows(items: list[SubmissionItem]) -> list[dict]:
+    rows = []
+    for item in items:
+        row = item.model_dump()
+        row["attachment"] = item.attachment or "未关联"
+        rows.append(row)
+    return rows
+
+
 store = get_store()
 llm_client = get_llm_client()
 
@@ -301,10 +327,21 @@ st.progress(
 step_columns = st.columns(workflow["total"])
 for column, step in zip(step_columns, workflow["steps"], strict=True):
     column.caption(f"{'✓' if step['complete'] else '○'} {step['label']}")
-st.caption(f"已关联知识资料：{workflow['knowledge_files']} 个文件")
+st.caption(
+    f"已关联知识资料：{workflow['knowledge_files']} 个文件 · "
+    f"提交附件：{workflow['attachment_files']} 个文件"
+)
 
-tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export = st.tabs(
-    ["1. 招标文件", "2. 分析确认", "3. 知识资料", "4. 章节生成", "5. 复核检查", "6. Word 导出"]
+tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export, tab_submission = st.tabs(
+    [
+        "1. 招标文件",
+        "2. 分析确认",
+        "3. 知识资料",
+        "4. 章节生成",
+        "5. 复核检查",
+        "6. Word 导出",
+        "7. 提交清单",
+    ]
 )
 
 with tab_upload:
@@ -783,3 +820,209 @@ with tab_export:
             st.caption(str(selected_version["path"]))
         else:
             st.caption("尚未生成 Word 版本。")
+
+
+with tab_submission:
+    st.subheader("附件目录与最终提交清单")
+    analysis = _load_analysis(store, current_id)
+    submission_items = _load_submission_items(store, current_id)
+    attachment_files = store.list_attachment_files(current_id)
+    attachment_refs = {
+        f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
+        for category_id, paths in attachment_files.items()
+        for path in paths
+    }
+    submission_summary = summarize_submission_items(submission_items, attachment_refs)
+
+    summary_columns = st.columns(5)
+    summary_columns[0].metric("清单项", submission_summary["total"])
+    summary_columns[1].metric("必交项", submission_summary["required"])
+    summary_columns[2].metric("已备妥", submission_summary["ready"])
+    summary_columns[3].metric("待准备", submission_summary["pending_required"])
+    summary_columns[4].metric("已关联附件", submission_summary["linked"])
+
+    if submission_summary["complete"]:
+        st.success("所有必交项均已备妥或明确标记为不适用。")
+    elif submission_items:
+        st.warning(f"仍有 {submission_summary['pending_required']} 个必交项待准备。")
+    if submission_summary["broken_links"]:
+        st.error(f"有 {submission_summary['broken_links']} 个清单项关联的附件已不存在。")
+
+    sync_label = "同步招标材料" if submission_items else "从分析结果生成清单"
+    if st.button(
+        sync_label,
+        disabled=analysis is None,
+        key=f"sync_submission_{current_id}",
+        icon=":material/sync:",
+    ):
+        synced = sync_submission_items(analysis, submission_items)
+        store.save_json(current_id, "submission_checklist", [item.model_dump() for item in synced])
+        st.session_state.pop(f"submission_editor_{current_id}", None)
+        st.session_state["project_flash"] = f"提交清单已同步，共 {len(synced)} 项"
+        st.rerun()
+
+    st.markdown("#### 提交附件")
+    upload_columns = st.columns([1, 3])
+    attachment_category = upload_columns[0].selectbox(
+        "附件类别",
+        options=list(ATTACHMENT_CATEGORY_LABELS),
+        format_func=lambda value: ATTACHMENT_CATEGORY_LABELS[value],
+        key=f"attachment_category_{current_id}",
+    )
+    attachment_uploads = upload_columns[1].file_uploader(
+        "选择附件",
+        accept_multiple_files=True,
+        key=(
+            f"attachment_upload_{current_id}_"
+            f"{st.session_state.get(f'attachment_upload_nonce_{current_id}', 0)}"
+        ),
+    )
+    if st.button(
+        "保存附件",
+        disabled=not attachment_uploads,
+        key=f"save_attachments_{current_id}",
+        icon=":material/upload_file:",
+    ):
+        for item in attachment_uploads:
+            store.save_attachment_file(current_id, attachment_category, item.name, item.getvalue())
+        nonce_key = f"attachment_upload_nonce_{current_id}"
+        st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
+        st.session_state["project_flash"] = f"已保存 {len(attachment_uploads)} 个提交附件"
+        st.rerun()
+
+    attachment_files = store.list_attachment_files(current_id)
+    for category_id, label in ATTACHMENT_CATEGORY_LABELS.items():
+        paths = attachment_files[category_id]
+        with st.expander(f"{label}（{len(paths)}）", expanded=bool(paths)):
+            if not paths:
+                st.caption("暂无附件")
+                continue
+            for path in paths:
+                reference = f"{category_id}/{path.name}"
+                file_columns = st.columns([5, 1, 1])
+                file_columns[0].write(f"{path.name} · {path.stat().st_size / 1024:.1f} KB")
+                file_columns[1].download_button(
+                    "下载",
+                    data=path.read_bytes(),
+                    file_name=path.name,
+                    mime=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                    key=f"download_attachment_{current_id}_{reference}",
+                    icon=":material/download:",
+                )
+                if file_columns[2].button(
+                    "移除",
+                    key=f"delete_attachment_{current_id}_{reference}",
+                    icon=":material/delete:",
+                ):
+                    store.delete_attachment_file(current_id, reference)
+                    st.session_state["project_flash"] = f"已移除附件：{path.name}"
+                    st.rerun()
+
+    st.markdown("#### 最终提交材料清单")
+    attachment_files = store.list_attachment_files(current_id)
+    current_attachment_refs = {
+        f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
+        for category_id, paths in attachment_files.items()
+        for path in paths
+    }
+    existing_attachment_refs = {item.attachment for item in submission_items if item.attachment}
+    attachment_options = ["未关联"] + sorted(current_attachment_refs | existing_attachment_refs)
+    submission_columns = [
+        "id",
+        "category",
+        "name",
+        "source_requirement_id",
+        "source_page",
+        "required",
+        "status",
+        "attachment",
+        "note",
+    ]
+    submission_frame = pd.DataFrame(_submission_rows(submission_items), columns=submission_columns)
+    edited_submission = st.data_editor(
+        submission_frame,
+        key=f"submission_editor_{current_id}",
+        num_rows="dynamic",
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "id": None,
+            "source_requirement_id": None,
+            "category": st.column_config.SelectboxColumn(
+                "类别", options=SUBMISSION_CATEGORIES, required=True, width="small"
+            ),
+            "name": st.column_config.TextColumn("材料名称", required=True, width="large"),
+            "source_page": st.column_config.NumberColumn("页码", min_value=1, step=1, width="small"),
+            "required": st.column_config.CheckboxColumn("必交", default=True, width="small"),
+            "status": st.column_config.SelectboxColumn(
+                "状态", options=SUBMISSION_STATUS_OPTIONS, required=True, width="small"
+            ),
+            "attachment": st.column_config.SelectboxColumn(
+                "关联附件", options=attachment_options, width="medium"
+            ),
+            "note": st.column_config.TextColumn("备注", width="large"),
+        },
+    )
+    submission_records = (
+        edited_submission.to_dict("records") if isinstance(edited_submission, pd.DataFrame) else edited_submission
+    )
+    edited_items: list[SubmissionItem] = []
+    for row in submission_records:
+        name = str(_clean_value(row.get("name"))).strip()
+        if not name:
+            continue
+        category = str(_clean_value(row.get("category"), "其他"))
+        status = str(_clean_value(row.get("status"), "待准备"))
+        edited_items.append(
+            SubmissionItem(
+                id=str(_clean_value(row.get("id"), "")) or SubmissionItem(name=name).id,
+                category=category if category in SUBMISSION_CATEGORIES else "其他",
+                name=name,
+                source_requirement_id=str(_clean_value(row.get("source_requirement_id"))),
+                source_page=int(row["source_page"]) if _clean_value(row.get("source_page"), None) else None,
+                required=bool(_clean_value(row.get("required"), True)),
+                status=status if status in SUBMISSION_STATUS_OPTIONS else "待准备",
+                attachment=(
+                    ""
+                    if str(_clean_value(row.get("attachment"))) == "未关联"
+                    else str(_clean_value(row.get("attachment")))
+                ),
+                note=str(_clean_value(row.get("note"))).strip(),
+            )
+        )
+
+    action_columns = st.columns([1, 1, 4])
+    if action_columns[0].button(
+        "保存清单",
+        type="primary",
+        key=f"save_submission_{current_id}",
+        icon=":material/save:",
+    ):
+        store.save_json(current_id, "submission_checklist", [item.model_dump() for item in edited_items])
+        saved_summary = summarize_submission_items(edited_items, current_attachment_refs)
+        message = "提交清单已完成" if saved_summary["complete"] else "提交清单已保存"
+        st.session_state["project_flash"] = message
+        st.rerun()
+
+    csv_rows = [
+        {
+            "类别": item.category,
+            "材料名称": item.name,
+            "原文页码": item.source_page or "",
+            "必交": "是" if item.required else "否",
+            "状态": item.status,
+            "关联附件": item.attachment,
+            "备注": item.note,
+        }
+        for item in edited_items
+    ]
+    csv_data = ("\ufeff" + pd.DataFrame(csv_rows).to_csv(index=False)).encode("utf-8")
+    action_columns[1].download_button(
+        "导出清单",
+        data=csv_data,
+        file_name=safe_filename(f"{project['name']}_最终提交材料清单.csv"),
+        mime="text/csv;charset=utf-8",
+        disabled=not edited_items,
+        key=f"download_submission_{current_id}",
+        icon=":material/download:",
+    )

@@ -38,6 +38,8 @@ def test_store_rejects_invalid_identifiers(tmp_path: Path) -> None:
         store.project_dir("../escape")
     with pytest.raises(ValueError):
         store.save_knowledge_file("project", "unknown", "a.txt", b"x")
+    with pytest.raises(ValueError):
+        store.save_attachment_file("project", "unknown", "a.txt", b"x")
 
 
 def test_safe_filename_removes_path_and_windows_characters() -> None:
@@ -91,6 +93,8 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     store.save_json(project_id, "drafts", [{"title": "第一版"}])
     store.save_json(project_id, "review", {"issues": []})
     store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
+    store.save_attachment_file(project_id, "qualification", "营业执照.pdf", b"license")
+    store.save_json(project_id, "submission_checklist", [{"name": "营业执照", "status": "已备妥"}])
     store.save_draft_version(project_id, [{"title": "第一版"}], "首次保存")
     old_output = store.output_path(project_id, "旧初稿.docx")
     old_output.write_bytes(b"docx")
@@ -112,6 +116,8 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert store.load_json(duplicate["id"], "analysis") == {"ok": True}
     assert store.load_json(duplicate["id"], "drafts") == [{"title": "第一版"}]
     assert store.list_knowledge_files(duplicate["id"])["company"][0].read_bytes() == b"company"
+    assert sum(len(paths) for paths in store.list_attachment_files(duplicate["id"]).values()) == 0
+    assert store.load_json(duplicate["id"], "submission_checklist") is None
     assert not (store.project_dir(duplicate["id"]) / "output").exists()
     assert store.list_draft_versions(duplicate["id"]) == []
     assert store.list_export_versions(duplicate["id"]) == []
@@ -170,12 +176,40 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     store.save_json(project_id, "analysis", {"project_info": {}})
     store.save_json(project_id, "drafts", [{"title": "draft"}])
     store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
+    store.save_attachment_file(project_id, "qualification", "营业执照.pdf", b"license")
 
     progress = store.project_progress(project_id)
 
     assert progress["completed"] == 4
-    assert progress["percent"] == 67
+    assert progress["percent"] == 57
     assert progress["knowledge_files"] == 1
+    assert progress["attachment_files"] == 1
+
+    store.save_json(
+        project_id,
+        "submission_checklist",
+        [{"name": "营业执照", "required": True, "status": "已备妥"}],
+    )
+
+    completed_progress = store.project_progress(project_id)
+    assert completed_progress["completed"] == 5
+    assert completed_progress["steps"][-1]["complete"] is True
+
+
+def test_attachment_files_are_categorized_unique_and_deletable(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("附件测试")
+
+    first = store.save_attachment_file(project["id"], "qualification", "营业执照?.pdf", b"first")
+    second = store.save_attachment_file(project["id"], "qualification", "营业执照?.pdf", b"second")
+    reference = f"qualification/{first.name}"
+
+    assert first.name == "营业执照_.pdf"
+    assert second.name == "营业执照_ (2).pdf"
+    assert store.attachment_path(project["id"], reference) == first
+    assert store.attachment_path(project["id"], "../bad") is None
+    assert store.delete_attachment_file(project["id"], reference) is True
+    assert store.delete_attachment_file(project["id"], reference) is False
 
 
 def test_word_outputs_are_versioned_and_recorded(tmp_path: Path) -> None:
@@ -243,6 +277,12 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     source_store.save_source(source["id"], "招标文件.txt", "招标内容".encode())
     source_store.save_json(source["id"], "analysis", {"ok": True})
     source_store.save_knowledge_file(source["id"], "company", "企业.txt", b"company")
+    source_store.save_attachment_file(source["id"], "qualification", "营业执照.pdf", b"license")
+    source_store.save_json(
+        source["id"],
+        "submission_checklist",
+        [{"name": "营业执照", "required": True, "status": "已备妥"}],
+    )
     output = source_store.output_path(source["id"], "初稿.docx")
     output.write_bytes(b"docx")
     source_store.record_export_version(
@@ -265,6 +305,8 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     assert target_store.source_path(imported["id"]).read_text(encoding="utf-8") == "招标内容"
     assert target_store.output_path(imported["id"], "初稿.docx").read_bytes() == b"docx"
     assert target_store.list_export_versions(imported["id"])[0]["note"] == "备份版本"
+    assert target_store.list_attachment_files(imported["id"])["qualification"][0].read_bytes() == b"license"
+    assert target_store.load_json(imported["id"], "submission_checklist")[0]["status"] == "已备妥"
 
     duplicate = target_store.import_project_archive(backup)
     assert duplicate["id"] != source["id"]
