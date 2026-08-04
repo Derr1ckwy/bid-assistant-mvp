@@ -24,7 +24,12 @@ from bid_assistant.models import (
     SubmissionItem,
     TenderAnalysis,
 )
-from bid_assistant.packager import build_package_readiness, create_submission_package
+from bid_assistant.packager import (
+    build_package_readiness,
+    build_package_verification_report,
+    create_submission_package,
+    verify_submission_package,
+)
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
 from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
@@ -208,6 +213,17 @@ def _submission_rows(items: list[SubmissionItem]) -> list[dict]:
         row["attachment"] = item.attachment or "未关联"
         rows.append(row)
     return rows
+
+
+@st.cache_data(show_spinner=False)
+def _verify_package_cached(
+    path_value: str,
+    expected_sha256: str,
+    file_size: int,
+    modified_ns: int,
+) -> dict:
+    del file_size, modified_ns
+    return verify_submission_package(path_value, expected_sha256=expected_sha256)
 
 
 store = get_store()
@@ -1170,17 +1186,55 @@ with tab_submission:
             key=f"package_version_{current_id}",
         )
         selected_package = package_by_id[selected_package_id]
-        st.download_button(
+        package_stat = selected_package["path"].stat()
+        verification = _verify_package_cached(
+            str(selected_package["path"]),
+            selected_package["sha256"],
+            package_stat.st_size,
+            package_stat.st_mtime_ns,
+        )
+        if verification["valid"]:
+            st.success(
+                f"完整性校验通过：{verification['file_count']} 个内容文件，"
+                f"{verification['content_size'] / 1024 / 1024:.2f} MB。"
+            )
+        else:
+            st.error("完整性校验不通过，已停止提交包下载。")
+            st.dataframe(
+                [{"issue": item} for item in verification["errors"]],
+                width="stretch",
+                hide_index=True,
+                column_config={"issue": st.column_config.TextColumn("校验错误", width="large")},
+            )
+        if verification["warnings"]:
+            st.warning("；".join(verification["warnings"]))
+
+        verification_report = build_package_verification_report(
+            verification,
+            package_version=selected_package,
+        )
+        download_columns = st.columns([1, 1, 3])
+        download_columns[0].download_button(
             "下载所选提交包",
-            data=selected_package["path"].read_bytes(),
+            data=selected_package["path"].read_bytes() if verification["valid"] else b"",
             file_name=selected_package["filename"],
             mime="application/zip",
+            disabled=not verification["valid"],
             width="stretch",
             icon=":material/download:",
         )
+        download_columns[1].download_button(
+            "下载校验报告",
+            data=verification_report,
+            file_name=safe_filename(f"{Path(selected_package['filename']).stem}_校验报告.txt"),
+            mime="text/plain;charset=utf-8",
+            width="stretch",
+            icon=":material/verified:",
+        )
         st.caption(
-            f"SHA-256：{selected_package['sha256']} · "
-            f"{selected_package['size'] / 1024 / 1024:.2f} MB"
+            f"实际 SHA-256：{verification['sha256']} · "
+            f"{verification['size'] / 1024 / 1024:.2f} MB · "
+            f"校验时间：{verification['verified_at'].replace('T', ' ').replace('+00:00', ' UTC')}"
         )
     else:
         st.caption("尚未生成提交包版本。")
