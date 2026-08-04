@@ -82,6 +82,28 @@ class KnowledgeChunk(BaseModel):
     score: float = 0
 
 
+class ReviewIssue(BaseModel):
+    id: str = Field(default_factory=lambda: make_id("issue"))
+    severity: Literal["高", "中", "低"]
+    category: str
+    message: str
+    suggestion: str = ""
+    related_id: str = ""
+    source_page: int | None = None
+    status: Literal["待处理", "已处理", "忽略"] = "待处理"
+
+
+class ReviewReport(BaseModel):
+    issues: list[ReviewIssue] = Field(default_factory=list)
+    generated_at: str = Field(default_factory=utc_now_iso)
+
+    def severity_count(self, severity: Literal["高", "中", "低"]) -> int:
+        return sum(item.severity == severity and item.status == "待处理" for item in self.issues)
+
+    def pending_count(self) -> int:
+        return sum(item.status == "待处理" for item in self.issues)
+
+
 class TenderAnalysis(BaseModel):
     project_info: ProjectInfo = Field(default_factory=ProjectInfo)
     mandatory_requirements: list[RequirementItem] = Field(default_factory=list)

@@ -35,3 +35,61 @@ def test_rule_analysis_extracts_key_items() -> None:
     assert analysis.scoring_items[0].points == "20"
     assert analysis.risks
     assert len(analysis.outline) == 6
+
+
+class FakeChunkClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat_json(self, messages: list[dict[str, str]]) -> dict:
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "project_info": {"project_name": "长文档测试项目", "purchaser": "测试采购人"},
+                "mandatory_requirements": [
+                    {
+                        "content": "投标人必须提交营业执照。",
+                        "source_page": 1,
+                        "source_quote": "投标人必须提交营业执照。",
+                        "confidence": 0.9,
+                        "status": "待确认",
+                    }
+                ],
+            }
+        return {
+            "scoring_items": [
+                {
+                    "criterion": "技术方案评分标准：20 分。",
+                    "points": "20",
+                    "source_page": 2,
+                    "source_quote": "技术方案评分标准：20 分。",
+                    "confidence": 0.9,
+                    "status": "待确认",
+                }
+            ]
+        }
+
+
+def test_llm_analysis_splits_and_merges_long_document() -> None:
+    page_one = "项目名称：长文档测试项目\n投标人必须提交营业执照。\n" + "甲" * 30000
+    page_two = "技术方案评分标准：20 分。\n" + "乙" * 30000
+    document = ParsedDocument(
+        filename="long.pdf",
+        file_type="pdf",
+        pages=[
+            ParsedPage(page_number=1, text=page_one),
+            ParsedPage(page_number=2, text=page_two),
+        ],
+        full_text=f"[第 1 页]\n{page_one}\n\n[第 2 页]\n{page_two}",
+        char_count=len(page_one) + len(page_two),
+    )
+    client = FakeChunkClient()
+
+    analysis = analyze_document(document, client, use_llm=True)
+
+    assert client.calls == 2
+    assert analysis.analysis_mode == "llm_chunked"
+    assert analysis.project_info.project_name == "长文档测试项目"
+    assert len(analysis.mandatory_requirements) == 1
+    assert len(analysis.scoring_items) == 1
+    assert any("分 2 段分析" in warning for warning in analysis.warnings)

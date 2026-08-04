@@ -10,7 +10,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from bid_assistant.models import ChapterDraft, TenderAnalysis
+from bid_assistant.models import ChapterDraft, ReviewReport, TenderAnalysis
 
 
 def _set_east_asia_font(style, font_name: str) -> None:
@@ -175,10 +175,40 @@ def _add_analysis_appendix(document: Document, analysis: TenderAnalysis) -> None
         document.add_paragraph(item.content, style="List Bullet")
 
 
+def _add_review_appendix(document: Document, review: ReviewReport) -> None:
+    document.add_page_break()
+    document.add_heading("自动复核报告", level=1)
+    document.add_paragraph(
+        f"待处理问题 {review.pending_count()} 项，其中高风险 {review.severity_count('高')} 项、"
+        f"中风险 {review.severity_count('中')} 项、低风险 {review.severity_count('低')} 项。"
+    )
+    if not review.issues:
+        document.add_paragraph("当前规则未发现问题，仍需由投标负责人完成最终审核。")
+        return
+
+    table = document.add_table(rows=1, cols=6)
+    table.style = "Table Grid"
+    for cell, value in zip(
+        table.rows[0].cells,
+        ("级别", "类别", "问题", "建议", "页码", "状态"),
+        strict=True,
+    ):
+        cell.text = value
+    for item in review.issues:
+        cells = table.add_row().cells
+        cells[0].text = item.severity
+        cells[1].text = item.category
+        cells[2].text = item.message
+        cells[3].text = item.suggestion
+        cells[4].text = str(item.source_page or "")
+        cells[5].text = item.status
+
+
 def export_docx(
     output_path: str | Path,
     analysis: TenderAnalysis,
     drafts: list[ChapterDraft],
+    review: ReviewReport | None = None,
 ) -> Path:
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +228,8 @@ def export_docx(
             document.add_page_break()
 
     _add_analysis_appendix(document, analysis)
+    if review is not None:
+        _add_review_appendix(document, review)
     _add_header_footer(document, analysis.project_info.project_name or "未命名投标项目")
     document.save(target)
     return target

@@ -17,10 +17,13 @@ from bid_assistant.models import (
     ParsedDocument,
     ProjectInfo,
     RequirementItem,
+    ReviewIssue,
+    ReviewReport,
     ScoringItem,
     TenderAnalysis,
 )
 from bid_assistant.parsers import DocumentParseError, SUPPORTED_EXTENSIONS, parse_document
+from bid_assistant.reviewer import build_review_report
 from bid_assistant.storage import ProjectStore, safe_filename
 
 
@@ -44,6 +47,18 @@ CATEGORY_LABELS = {
     "history": "历史方案",
 }
 STATUS_OPTIONS = ["待确认", "已确认", "忽略", "待核对"]
+REVIEW_STATUS_OPTIONS = ["待处理", "已处理", "忽略"]
+PROJECT_STATUS_LABELS = {
+    "new": "新建",
+    "uploaded": "已上传",
+    "parsed": "已解析",
+    "analysis_pending_confirmation": "分析待确认",
+    "analysis_confirmed": "分析已确认",
+    "knowledge_ready": "资料已就绪",
+    "draft_generated": "草稿已生成",
+    "review_generated": "复核报告已生成",
+    "exported": "Word 已导出",
+}
 
 
 @st.cache_resource
@@ -88,7 +103,7 @@ def _requirement_editor(label: str, items: list[RequirementItem], key: str) -> l
         _requirement_rows(items),
         key=key,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "id": None,
@@ -126,7 +141,7 @@ def _scoring_editor(items: list[ScoringItem], key: str) -> list[ScoringItem]:
         rows,
         key=key,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "id": None,
@@ -165,13 +180,18 @@ def _load_analysis(store: ProjectStore, project_id: str) -> TenderAnalysis | Non
     return TenderAnalysis.model_validate(payload) if payload else None
 
 
+def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
+    payload = store.load_json(project_id, "review")
+    return ReviewReport.model_validate(payload) if payload else None
+
+
 store = get_store()
 llm_client = get_llm_client()
 projects = store.list_projects()
 
 st.sidebar.title("投标项目")
 new_name = st.sidebar.text_input("新项目名称", placeholder="例如：某某信息化项目")
-if st.sidebar.button("新建项目", type="primary", use_container_width=True):
+if st.sidebar.button("新建项目", type="primary", width="stretch"):
     project = store.create_project(new_name)
     st.session_state["project_id"] = project["id"]
     st.rerun()
@@ -194,7 +214,7 @@ if project_ids:
 
 with st.sidebar.expander("模型配置", expanded=False):
     st.code(f"{settings.llm_model}\n{settings.llm_base_url}")
-    if st.button("检测模型连接", use_container_width=True):
+    if st.button("检测模型连接", width="stretch"):
         if llm_client.is_available():
             st.success("模型接口可用")
         else:
@@ -209,13 +229,14 @@ if not current_id:
 
 project = store.get_project(current_id)
 st.title(project["name"])
+status_label = PROJECT_STATUS_LABELS.get(project["status"], project["status"])
 st.markdown(
-    f'<div class="status-note">项目状态：{project["status"]}。流程中的分析结果和正文均可人工修改。</div>',
+    f'<div class="status-note">项目状态：{status_label}。流程中的分析结果和正文均可人工修改。</div>',
     unsafe_allow_html=True,
 )
 
-tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_export = st.tabs(
-    ["1. 招标文件", "2. 分析确认", "3. 知识资料", "4. 章节生成", "5. Word 导出"]
+tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export = st.tabs(
+    ["1. 招标文件", "2. 分析确认", "3. 知识资料", "4. 章节生成", "5. 复核检查", "6. Word 导出"]
 )
 
 with tab_upload:
@@ -349,7 +370,7 @@ with tab_generate:
         outline_editor = st.data_editor(
             outline_rows,
             num_rows="dynamic",
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             key=f"outline_{current_id}",
             column_config={
@@ -444,6 +465,74 @@ with tab_generate:
                 store.save_json(current_id, "drafts", [draft.model_dump() for draft in edited_drafts])
                 st.success("正文修改已保存")
 
+with tab_review:
+    analysis = _load_analysis(store, current_id)
+    draft_payload = store.load_json(current_id, "drafts", [])
+    drafts = [ChapterDraft.model_validate(item) for item in draft_payload]
+    if not analysis:
+        st.info("完成招标分析后才能执行复核检查。")
+    else:
+        if st.button("生成或刷新复核报告", type="primary", key=f"review_{current_id}"):
+            review = build_review_report(analysis, drafts)
+            store.save_json(current_id, "review", review.model_dump())
+            store.update_project(current_id, status="review_generated")
+            st.rerun()
+
+        review = _load_review(store, current_id)
+        if review is None:
+            st.info("尚未生成复核报告。")
+        else:
+            metrics = st.columns(4)
+            metrics[0].metric("待处理", review.pending_count())
+            metrics[1].metric("高风险", review.severity_count("高"))
+            metrics[2].metric("中风险", review.severity_count("中"))
+            metrics[3].metric("低风险", review.severity_count("低"))
+
+            issue_rows = [
+                {
+                    "id": item.id,
+                    "severity": item.severity,
+                    "category": item.category,
+                    "status": item.status,
+                    "source_page": item.source_page,
+                    "detail": f"{item.message}\n处理建议：{item.suggestion}",
+                }
+                for item in review.issues
+            ]
+            edited_issues = st.data_editor(
+                issue_rows,
+                width="stretch",
+                hide_index=True,
+                height=520,
+                key=f"review_editor_{current_id}",
+                disabled=["id", "severity", "category", "detail", "source_page"],
+                column_config={
+                    "id": None,
+                    "severity": st.column_config.TextColumn("级别", width="small"),
+                    "category": st.column_config.TextColumn("类别", width="small"),
+                    "status": st.column_config.SelectboxColumn(
+                        "处理状态", options=REVIEW_STATUS_OPTIONS, required=True, width="small"
+                    ),
+                    "source_page": st.column_config.NumberColumn("页码", width="small"),
+                    "detail": st.column_config.TextColumn("问题与处理建议", width="large"),
+                },
+            )
+            records = edited_issues.to_dict("records") if isinstance(edited_issues, pd.DataFrame) else edited_issues
+            if st.button("保存复核状态", key=f"save_review_{current_id}"):
+                original_by_id = {item.id: item for item in review.issues}
+                updated: list[ReviewIssue] = []
+                for row in records:
+                    item_id = str(_clean_value(row.get("id")))
+                    original = original_by_id.get(item_id)
+                    if original is None:
+                        continue
+                    original.status = str(_clean_value(row.get("status"), "待处理"))
+                    updated.append(original)
+                review.issues = updated
+                store.save_json(current_id, "review", review.model_dump())
+                st.success("复核状态已保存")
+                st.rerun()
+
 with tab_export:
     analysis = _load_analysis(store, current_id)
     draft_payload = store.load_json(current_id, "drafts", [])
@@ -452,13 +541,17 @@ with tab_export:
         st.info("完成分析和章节生成后才能导出 Word。")
     else:
         st.subheader("导出固定格式 Word 初稿")
-        st.write(f"准备导出 {len(drafts)} 个章节，并附带强制要求、评分项和待核对事项。")
+        review = _load_review(store, current_id) or build_review_report(analysis, drafts)
+        st.write(
+            f"准备导出 {len(drafts)} 个章节，并附带强制要求、评分项和 {review.pending_count()} 个待处理复核问题。"
+        )
         project_name = analysis.project_info.project_name or project["name"]
         output_name = safe_filename(f"{project_name}_投标文件初稿.docx")
         output_path = store.output_path(current_id, output_name)
         if st.button("生成 Word", type="primary", key=f"export_{current_id}"):
             with st.spinner("正在生成 Word..."):
-                export_docx(output_path, analysis, drafts)
+                store.save_json(current_id, "review", review.model_dump())
+                export_docx(output_path, analysis, drafts, review)
                 store.update_project(current_id, status="exported")
             st.success("Word 已生成")
         if output_path.exists():
@@ -467,6 +560,6 @@ with tab_export:
                 data=output_path.read_bytes(),
                 file_name=output_path.name,
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
+                width="stretch",
             )
             st.caption(str(output_path))

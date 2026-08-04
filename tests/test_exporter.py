@@ -3,7 +3,15 @@ from pathlib import Path
 from docx import Document
 
 from bid_assistant.exporter import export_docx
-from bid_assistant.models import ChapterDraft, ProjectInfo, RequirementItem, ScoringItem, TenderAnalysis
+from bid_assistant.models import (
+    ChapterDraft,
+    ProjectInfo,
+    RequirementItem,
+    ReviewIssue,
+    ReviewReport,
+    ScoringItem,
+    TenderAnalysis,
+)
 
 
 def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
@@ -29,8 +37,18 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
             markdown="## 总体设计\n\n1. 建立统一平台。\n\n- 支持人工复核。",
         )
     ]
+    review = ReviewReport(
+        issues=[
+            ReviewIssue(
+                severity="高",
+                category="废标风险",
+                message="必须复核营业执照。",
+                suggestion="确认文件有效期。",
+            )
+        ]
+    )
 
-    result = export_docx(output, analysis, drafts)
+    result = export_docx(output, analysis, drafts, review)
     reopened = Document(result)
     text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
     footer_xml = reopened.sections[0].footer._element.xml
@@ -39,4 +57,5 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
     assert "智慧园区项目" in text
     assert "第 1 章 技术方案" in text
     assert "生成依据与待核对事项" in text
+    assert "自动复核报告" in text
     assert "PAGE" in footer_xml

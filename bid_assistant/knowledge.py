@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from bid_assistant.models import KnowledgeChunk
@@ -38,6 +39,17 @@ def _query_terms(query: str) -> list[str]:
     return sorted(expanded, key=len, reverse=True)[:40]
 
 
+@lru_cache(maxsize=256)
+def _cached_file_chunks(path_value: str, modified_ns: int, size: int) -> tuple[str, ...]:
+    del modified_ns, size
+    parsed = parse_document(Path(path_value))
+    return tuple(_chunks(parsed.full_text))
+
+
+def clear_knowledge_cache() -> None:
+    _cached_file_chunks.cache_clear()
+
+
 def search_knowledge(
     query: str,
     files_by_category: dict[str, list[Path]],
@@ -49,10 +61,13 @@ def search_knowledge(
     for category, files in files_by_category.items():
         for path in files:
             try:
-                parsed = parse_document(path)
+                stat = path.stat()
+                chunks = _cached_file_chunks(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
             except DocumentParseError:
                 continue
-            for text in _chunks(parsed.full_text):
+            except OSError:
+                continue
+            for text in chunks:
                 normalized = text.lower()
                 score = sum(normalized.count(term) * min(len(term), 6) for term in terms)
                 if score:
