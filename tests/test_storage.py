@@ -91,6 +91,13 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     project_id = project["id"]
     store.save_source(project_id, "招标文件.txt", b"tender")
     store.save_json(project_id, "analysis", {"ok": True})
+    store.save_json(project_id, "analysis_baseline", {"baseline": True})
+    store.save_json(
+        project_id,
+        "analysis_baseline_meta",
+        {"origin": "自动分析", "source_fingerprint": "abc"},
+    )
+    store.save_json(project_id, "analysis_acceptance", {"complete": True})
     store.save_json(project_id, "drafts", [{"title": "第一版"}])
     store.save_json(project_id, "review", {"issues": []})
     store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
@@ -125,6 +132,12 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert duplicate["status"] == "review_generated"
     assert duplicate["archived"] == 0
     assert store.load_json(duplicate["id"], "analysis") == {"ok": True}
+    assert store.load_json(duplicate["id"], "analysis_baseline") == {"baseline": True}
+    assert store.load_json(duplicate["id"], "analysis_baseline_meta") == {
+        "origin": "自动分析",
+        "source_fingerprint": "abc",
+    }
+    assert store.load_json(duplicate["id"], "analysis_acceptance") == {"complete": True}
     assert store.load_json(duplicate["id"], "drafts") == [{"title": "第一版"}]
     assert store.list_knowledge_files(duplicate["id"])["company"][0].read_bytes() == b"company"
     assert sum(len(paths) for paths in store.list_attachment_files(duplicate["id"]).values()) == 0
@@ -384,6 +397,13 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     source = source_store.create_project("迁移项目")
     source_store.save_source(source["id"], "招标文件.txt", "招标内容".encode())
     source_store.save_json(source["id"], "analysis", {"ok": True})
+    source_store.save_json(source["id"], "analysis_baseline", {"baseline": True})
+    source_store.save_json(
+        source["id"],
+        "analysis_baseline_meta",
+        {"origin": "自动分析", "source_fingerprint": "abc"},
+    )
+    source_store.save_json(source["id"], "analysis_acceptance", {"complete": True})
     source_store.save_knowledge_file(source["id"], "company", "企业.txt", b"company")
     source_store.save_attachment_file(source["id"], "qualification", "营业执照.pdf", b"license")
     source_store.save_json(
@@ -421,6 +441,12 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     assert imported["name"] == "迁移项目"
     assert imported["archived"] == 0
     assert target_store.load_json(imported["id"], "analysis") == {"ok": True}
+    assert target_store.load_json(imported["id"], "analysis_baseline") == {"baseline": True}
+    assert target_store.load_json(imported["id"], "analysis_baseline_meta") == {
+        "origin": "自动分析",
+        "source_fingerprint": "abc",
+    }
+    assert target_store.load_json(imported["id"], "analysis_acceptance") == {"complete": True}
     assert target_store.source_path(imported["id"]).read_text(encoding="utf-8") == "招标内容"
     assert target_store.output_path(imported["id"], "初稿.docx").read_bytes() == b"docx"
     assert target_store.list_export_versions(imported["id"])[0]["note"] == "备份版本"

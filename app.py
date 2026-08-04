@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import mimetypes
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from bid_assistant.acceptance import build_acceptance_report, build_analysis_acceptance
 from bid_assistant.analyzer import analyze_document
 from bid_assistant.config import settings
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
@@ -205,6 +207,11 @@ def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
 def _load_submission_items(store: ProjectStore, project_id: str) -> list[SubmissionItem]:
     payload = store.load_json(project_id, "submission_checklist", [])
     return [SubmissionItem.model_validate(item) for item in payload]
+
+
+def _parsed_fingerprint(document: ParsedDocument) -> str:
+    payload = document.model_dump_json().encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _submission_rows(items: list[SubmissionItem]) -> list[dict]:
@@ -431,6 +438,13 @@ with tab_analysis:
             with st.spinner("正在提取招标要求..."):
                 analysis = analyze_document(parsed, llm_client, use_llm=mode == "LLM 增强")
                 store.save_json(current_id, "analysis", analysis.model_dump())
+                store.save_json(current_id, "analysis_baseline", analysis.model_dump())
+                store.save_json(
+                    current_id,
+                    "analysis_baseline_meta",
+                    {"origin": "自动分析", "source_fingerprint": _parsed_fingerprint(parsed)},
+                )
+                store.delete_json(current_id, "analysis_acceptance")
                 store.delete_json(current_id, "review")
                 store.update_project(current_id, status="analysis_pending_confirmation")
             st.success("分析完成，请逐项确认")
@@ -457,25 +471,194 @@ with tab_analysis:
                 deadlines = _requirement_editor("时间节点", analysis.deadlines, f"deadlines_{current_id}")
                 risks = _requirement_editor("废标风险", analysis.risks, f"risks_{current_id}")
 
+            edited_analysis = analysis.model_copy(deep=True)
+            edited_analysis.project_info = ProjectInfo(
+                project_name=project_name,
+                purchaser=purchaser,
+                agency=agency,
+                budget=budget,
+                bid_deadline=deadline,
+            )
+            edited_analysis.mandatory_requirements = mandatory
+            edited_analysis.scoring_items = scoring
+            edited_analysis.qualification_requirements = qualifications
+            edited_analysis.required_documents = documents
+            edited_analysis.deadlines = deadlines
+            edited_analysis.risks = risks
+            analysis_has_unsaved_changes = edited_analysis.model_dump() != analysis.model_dump()
+
             if st.button("保存人工确认结果", type="primary", key=f"save_analysis_{current_id}"):
-                analysis.project_info = ProjectInfo(
-                    project_name=project_name,
-                    purchaser=purchaser,
-                    agency=agency,
-                    budget=budget,
-                    bid_deadline=deadline,
-                )
-                analysis.mandatory_requirements = mandatory
-                analysis.scoring_items = scoring
-                analysis.qualification_requirements = qualifications
-                analysis.required_documents = documents
-                analysis.deadlines = deadlines
-                analysis.risks = risks
-                store.save_json(current_id, "analysis", analysis.model_dump())
+                store.save_json(current_id, "analysis", edited_analysis.model_dump())
+                store.delete_json(current_id, "analysis_acceptance")
                 store.delete_json(current_id, "review")
                 store.update_project(current_id, name=project_name or project["name"], status="analysis_confirmed")
                 st.success("确认结果已保存")
                 st.rerun()
+
+            st.divider()
+            st.subheader("真实项目分析验收")
+            baseline_payload = store.load_json(current_id, "analysis_baseline")
+            if not baseline_payload:
+                st.info("当前项目没有自动分析基线。重新分析可生成完整基线，也可从当前结果开始记录后续变化。")
+                if analysis_has_unsaved_changes:
+                    st.warning("分析表格存在未保存修改，请先保存人工确认结果。")
+                if st.button(
+                    "以当前结果建立后续迭代基线",
+                    key=f"acceptance_baseline_{current_id}",
+                    disabled=analysis_has_unsaved_changes,
+                ):
+                    store.save_json(current_id, "analysis_baseline", analysis.model_dump())
+                    store.save_json(
+                        current_id,
+                        "analysis_baseline_meta",
+                        {
+                            "origin": "历史项目当前结果",
+                            "source_fingerprint": _parsed_fingerprint(parsed),
+                        },
+                    )
+                    store.delete_json(current_id, "analysis_acceptance")
+                    st.success("验收基线已建立")
+                    st.rerun()
+            else:
+                baseline = TenderAnalysis.model_validate(baseline_payload)
+                baseline_meta = store.load_json(current_id, "analysis_baseline_meta", {})
+                baseline_origin = str(baseline_meta.get("origin") or "未知")
+                baseline_source_fingerprint = str(baseline_meta.get("source_fingerprint") or "")
+                source_matches = (
+                    baseline_source_fingerprint == _parsed_fingerprint(parsed)
+                    if baseline_source_fingerprint
+                    else None
+                )
+                saved_acceptance = store.load_json(current_id, "analysis_acceptance", {})
+                st.caption(f"验收基线来源：{baseline_origin}")
+                if baseline_origin != "自动分析":
+                    st.info("该基线只统计建立之后的变化，不代表最初自动分析结果。")
+                acceptance_columns = st.columns([1, 1, 1])
+                reviewer = acceptance_columns[0].text_input(
+                    "验收人",
+                    value=str(saved_acceptance.get("reviewer", "")),
+                    key=f"acceptance_reviewer_{current_id}",
+                )
+                manual_minutes = acceptance_columns[1].number_input(
+                    "纯人工预计耗时（分钟）",
+                    min_value=0.0,
+                    step=5.0,
+                    value=float(saved_acceptance.get("manual_minutes") or 0),
+                    key=f"acceptance_manual_minutes_{current_id}",
+                )
+                assisted_minutes = acceptance_columns[2].number_input(
+                    "系统协助实际耗时（分钟）",
+                    min_value=0.0,
+                    step=5.0,
+                    value=float(saved_acceptance.get("assisted_minutes") or 0),
+                    key=f"acceptance_assisted_minutes_{current_id}",
+                )
+                acceptance_notes = st.text_area(
+                    "验收备注",
+                    value=str(saved_acceptance.get("notes", "")),
+                    placeholder="记录漏项原因、误报类型和本轮人工处理情况",
+                    key=f"acceptance_notes_{current_id}",
+                )
+                acceptance = build_analysis_acceptance(
+                    baseline,
+                    edited_analysis,
+                    baseline_origin=baseline_origin,
+                    source_matches=source_matches,
+                    source_filename=parsed.filename,
+                    reviewer=reviewer,
+                    manual_minutes=manual_minutes,
+                    assisted_minutes=assisted_minutes,
+                    notes=acceptance_notes,
+                )
+
+                acceptance_metrics = st.columns(5)
+                acceptance_metrics[0].metric("自动提取", acceptance["baseline_count"])
+                acceptance_metrics[1].metric("确认命中", acceptance["accepted_count"])
+                acceptance_metrics[2].metric("误报/删除", acceptance["rejected_count"])
+                acceptance_metrics[3].metric("人工补充", acceptance["manual_addition_count"])
+                acceptance_metrics[4].metric("待确认", acceptance["pending_count"])
+
+                quality_metrics = st.columns(4)
+                hit_rate = acceptance["reviewed_hit_rate_percent"]
+                coverage = acceptance["estimated_coverage_percent"]
+                time_saved = acceptance["time_saved_minutes"]
+                quality_metrics[0].metric(
+                    "已审核项命中率",
+                    "待复核" if hit_rate is None else f"{hit_rate:.1f}%",
+                )
+                quality_metrics[1].metric(
+                    "覆盖率估算",
+                    "待复核" if coverage is None else f"{coverage:.1f}%",
+                )
+                quality_metrics[2].metric("人工修改", acceptance["edited_count"])
+                quality_metrics[3].metric(
+                    "节省时间",
+                    "未填写" if time_saved is None else f"{time_saved:.1f} 分钟",
+                )
+
+                if source_matches is False:
+                    st.error("当前解析结果与验收基线不一致，请重新执行分析后再验收。")
+                elif acceptance["complete"]:
+                    st.success("人工复核已完成，可将本项目计入真实文件验收样本。")
+                else:
+                    st.warning("当前仍是阶段性验收样本，请完成待确认和待核对项。")
+                if analysis_has_unsaved_changes:
+                    st.warning("分析表格存在未保存修改，验收记录保存和报告下载已暂停。")
+
+                detail_rows = []
+                for result_label, key in (
+                    ("确认命中", "accepted_items"),
+                    ("误报/删除", "rejected_items"),
+                    ("人工补充", "manual_items"),
+                    ("待确认", "pending_items"),
+                ):
+                    detail_rows.extend(
+                        {
+                            "结果": result_label,
+                            "类别": item["category"],
+                            "内容": item["content"],
+                            "页码": item["source_page"],
+                            "处理": item["result"],
+                        }
+                        for item in acceptance[key]
+                    )
+                if detail_rows:
+                    with st.expander(f"查看验收明细（{len(detail_rows)}）"):
+                        st.dataframe(
+                            detail_rows,
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "结果": st.column_config.TextColumn("结果", width="small"),
+                                "类别": st.column_config.TextColumn("类别", width="small"),
+                                "内容": st.column_config.TextColumn("内容", width="large"),
+                                "页码": st.column_config.NumberColumn("页码", width="small"),
+                                "处理": st.column_config.TextColumn("处理", width="small"),
+                            },
+                        )
+
+                acceptance_report = build_acceptance_report(acceptance)
+                acceptance_actions = st.columns([1, 1, 3])
+                acceptance_actions_disabled = analysis_has_unsaved_changes or source_matches is False
+                if acceptance_actions[0].button(
+                    "保存验收记录",
+                    key=f"save_acceptance_{current_id}",
+                    icon=":material/save:",
+                    width="stretch",
+                    disabled=acceptance_actions_disabled,
+                ):
+                    store.save_json(current_id, "analysis_acceptance", acceptance)
+                    st.success("验收记录已保存")
+                acceptance_actions[1].download_button(
+                    "下载验收报告",
+                    data=acceptance_report,
+                    file_name=safe_filename(f"{analysis.project_info.project_name or project['name']}_分析验收报告.txt"),
+                    mime="text/plain;charset=utf-8",
+                    key=f"download_acceptance_{current_id}",
+                    icon=":material/download:",
+                    width="stretch",
+                    disabled=acceptance_actions_disabled,
+                )
 
 with tab_knowledge:
     st.subheader("项目知识资料")
