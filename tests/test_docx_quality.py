@@ -65,7 +65,7 @@ def test_exported_word_passes_integrity_and_layout_quality_checks(tmp_path: Path
     assert quality["warnings"] == []
     assert quality["chapter_count"] == 1
     assert quality["paragraph_count"] > 10
-    assert quality["table_count"] >= 2
+    assert quality["table_count"] >= 1
     assert all(item["status"] == "pass" for item in quality["checks"])
     assert report.startswith(b"\xef\xbb\xbf")
     report_text = report.decode("utf-8-sig")

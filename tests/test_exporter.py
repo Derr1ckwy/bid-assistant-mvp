@@ -61,16 +61,16 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
     assert result.exists()
     assert "智慧园区项目" in text
     assert "第 1 章 技术方案" in text
-    assert "生成依据与待核对事项" in text
-    assert "自动复核报告" in text
+    assert "内部核对事项" not in text
+    assert "内部复核报告" not in text
     assert "PAGE" in footer_xml
     assert reopened.sections[0].different_first_page_header_footer is True
     assert "智慧园区项目" not in first_header_xml
     assert "PAGE" not in first_footer_xml
     assert len(reopened.sections[0].footer.tables) == 1
     footer_table = reopened.sections[0].footer.tables[0]
-    assert footer_table.rows[0].cells[0].text == "AI 辅助生成 · 人工复核后使用"
-    assert footer_table.rows[0].cells[1].paragraphs[0].alignment == 2
+    assert "AI" not in footer_table.rows[0].cells[0].text
+    assert footer_table.rows[0].cells[1].paragraphs[0].alignment == 1
     assert len(reopened.sections[0].header.tables) == 1
     header_table = reopened.sections[0].header.tables[0]
     assert header_table.rows[0].cells[0].text == "智慧园区项目"
@@ -81,26 +81,18 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
     assert abs(section.page_height - Cm(29.7)) < 1000
 
     normal = reopened.styles["Normal"]
-    assert normal.font.size.pt == 10.5
-    assert normal.paragraph_format.line_spacing == 1.5
+    assert normal.font.size.pt == 12
+    assert normal.paragraph_format.line_spacing.pt == 26
     assert normal._element.xml.find('w:eastAsia="宋体"') >= 0
 
     cover_title = next(paragraph for paragraph in reopened.paragraphs if paragraph.text == "智慧园区项目")
     assert cover_title.runs[0]._element.find(qn("w:rPr")).find(qn("w:spacing")) is not None
 
     cover_metadata = reopened.tables[0]
-    assert [cell.width for cell in cover_metadata.rows[0].cells] == [
-        1500 * 635,
-        2950 * 635,
-        1500 * 635,
-        2951 * 635,
-    ]
-    for index in (0, 2):
-        assert cover_metadata.rows[0].cells[index]._tc.tcPr.find(qn("w:noWrap")) is not None
+    assert [cell.width for cell in cover_metadata.rows[0].cells] == [2750 * 635, 6151 * 635]
+    assert cover_metadata.rows[0].cells[0]._tc.tcPr.find(qn("w:noWrap")) is not None
 
-    assert len(reopened.tables[-1].columns) == 4
-    for row in reopened.tables[-1].rows:
-        assert row._tr.trPr.find(qn("w:cantSplit")) is not None
+    assert len(reopened.tables) == 1
     for table in reopened.tables:
         layout = table._tbl.tblPr.find(qn("w:tblLayout"))
         width = table._tbl.tblPr.find(qn("w:tblW"))
@@ -136,3 +128,76 @@ def test_export_uses_real_template_and_appends_qualification_images(tmp_path: Pa
     assert "模板适配项目 | 采购人" in reopened.sections[0].header.paragraphs[0].text
     assert reopened.sections[0].header.paragraphs[0].runs[0].bold is True
     assert len(reopened.inline_shapes) == 1
+
+
+def test_export_cleans_model_markdown_and_uses_formal_monochrome_tables(tmp_path: Path) -> None:
+    output = tmp_path / "formal.docx"
+    analysis = TenderAnalysis(project_info=ProjectInfo(project_name="正式排版测试项目"))
+    drafts = [
+        ChapterDraft(
+            chapter_id="c1",
+            title="技术方案",
+            markdown=(
+                "```markdown\n---\ndoc_id: TEST-001\nsimulation: true\n---\n"
+                "# 技术方案\n\n## 实施步骤\n\n"
+                "1. 第一项。[资料1]\n2. 第二项。\n\n正文分隔。\n\n"
+                "1. 新的一组。\n2. 新的第二项。\n\n"
+                "| 序号 | 工作内容 | 状态 |\n| --- | --- | --- |\n"
+                "| 1 | 完成现场复核与方案确认 | 已完成 |\n```"
+            ),
+        )
+    ]
+
+    export_docx(output, analysis, drafts)
+    reopened = Document(output)
+    text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
+    footer_text = "\n".join(
+        cell.text
+        for table in reopened.sections[0].footer.tables
+        for row in table.rows
+        for cell in row.cells
+    )
+
+    assert "doc_id" not in text
+    assert "simulation:" not in text
+    assert "```" not in text
+    assert "[资料1]" not in text
+    assert sum(paragraph.text == "技术方案" for paragraph in reopened.paragraphs) == 0
+    assert "AI" not in footer_text
+
+    numbered = [
+        paragraph
+        for paragraph in reopened.paragraphs
+        if paragraph.text in {"第一项。", "第二项。", "新的一组。", "新的第二项。"}
+    ]
+    num_ids = [
+        paragraph._p.pPr.numPr.numId.val
+        for paragraph in numbered
+    ]
+    assert num_ids[0] == num_ids[1]
+    assert num_ids[2] == num_ids[3]
+    assert num_ids[0] != num_ids[2]
+
+    content_table = reopened.tables[-1]
+    header_fill = content_table.rows[0].cells[0]._tc.tcPr.find(qn("w:shd")).get(qn("w:fill"))
+    header_color = content_table.rows[0].cells[0].paragraphs[0].runs[0].font.color.rgb
+    assert header_fill == "F2F2F2"
+    assert str(header_color) == "000000"
+
+
+def test_internal_appendices_are_opt_in(tmp_path: Path) -> None:
+    output = tmp_path / "internal.docx"
+    analysis = TenderAnalysis(
+        project_info=ProjectInfo(project_name="内部评审项目"),
+        mandatory_requirements=[RequirementItem(content="必须提交营业执照。")],
+    )
+    drafts = [ChapterDraft(chapter_id="c1", title="响应方案", markdown="## 项目响应\n\n正文。")]
+    review = ReviewReport(
+        issues=[ReviewIssue(severity="高", category="资格", message="待确认。", suggestion="复核。")]
+    )
+
+    export_docx(output, analysis, drafts, review, include_internal_appendices=True)
+    text = "\n".join(paragraph.text for paragraph in Document(output).paragraphs)
+
+    assert "内部核对事项" in text
+    assert "内部复核报告" in text

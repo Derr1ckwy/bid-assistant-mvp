@@ -3,6 +3,7 @@
 .mineru-venv/
 __pycache__/
 .pytest_cache/
+tmp/
 *.pyc
 data/
 models/

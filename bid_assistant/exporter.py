@@ -6,7 +6,7 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
@@ -17,19 +17,18 @@ from bid_assistant.models import ChapterDraft, ReviewReport, TenderAnalysis
 
 BODY_FONT = "Times New Roman"
 BODY_FONT_EAST_ASIA = "宋体"
-HEADING_FONT = "Microsoft YaHei"
-HEADING_FONT_EAST_ASIA = "微软雅黑"
+HEADING_FONT = "Arial"
+HEADING_FONT_EAST_ASIA = "黑体"
+COVER_FONT = "STZhongsong"
+COVER_FONT_EAST_ASIA = "华文中宋"
 CONTENT_WIDTH_DXA = 8901
-TABLE_INDENT_DXA = 120
-NAVY = "1F4E78"
-BLUE = "2F75B5"
-DARK_TEXT = "222222"
-MUTED_TEXT = "667085"
-LIGHT_BLUE = "EAF1F8"
-LIGHT_GRAY = "F7F9FC"
-BORDER = "B8C6D5"
-RISK_RED = "B42318"
-LIGHT_RED = "FFF1F0"
+TABLE_INDENT_DXA = 0
+BLACK = "000000"
+DARK_TEXT = "1A1A1A"
+MUTED_TEXT = "666666"
+LIGHT_GRAY = "F2F2F2"
+PALE_GRAY = "FAFAFA"
+BORDER = "7F7F7F"
 
 
 def _set_character_spacing(element, points: float) -> None:
@@ -136,24 +135,25 @@ def _configure_document(document: Document) -> None:
         normal,
         latin=BODY_FONT,
         east_asia=BODY_FONT_EAST_ASIA,
-        size=10.5,
+        size=12,
         color=DARK_TEXT,
     )
     normal.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    normal.paragraph_format.line_spacing = 1.5
+    normal.paragraph_format.line_spacing = Pt(26)
+    normal.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
     normal.paragraph_format.space_before = Pt(0)
-    normal.paragraph_format.space_after = Pt(6)
-    normal.paragraph_format.first_line_indent = Cm(0.74)
+    normal.paragraph_format.space_after = Pt(0)
+    normal.paragraph_format.first_line_indent = Cm(0.85)
     normal.paragraph_format.widow_control = True
 
     style_tokens = (
-        ("Title", 26, NAVY, 0, 10, 2.0),
-        ("Subtitle", 15, MUTED_TEXT, 0, 14, 0.8),
-        ("Heading 1", 17, NAVY, 16, 8, 0.8),
-        ("Heading 2", 14, BLUE, 12, 6, 0.4),
-        ("Heading 3", 12, DARK_TEXT, 9, 4, 0.2),
+        ("Title", 26, 0, 12),
+        ("Subtitle", 16, 0, 14),
+        ("Heading 1", 18, 18, 12),
+        ("Heading 2", 15, 14, 8),
+        ("Heading 3", 13, 10, 6),
     )
-    for name, size, color, before, after, character_spacing in style_tokens:
+    for name, size, before, after in style_tokens:
         style = document.styles[name]
         _set_style_font(
             style,
@@ -161,12 +161,12 @@ def _configure_document(document: Document) -> None:
             east_asia=HEADING_FONT_EAST_ASIA,
             size=size,
             bold=True,
-            color=color,
-            character_spacing=character_spacing,
+            color=BLACK,
+            character_spacing=0,
         )
         style.paragraph_format.space_before = Pt(before)
         style.paragraph_format.space_after = Pt(after)
-        style.paragraph_format.line_spacing = 1.2
+        style.paragraph_format.line_spacing = 1.25
         style.paragraph_format.keep_with_next = True
         style.paragraph_format.widow_control = True
 
@@ -176,12 +176,13 @@ def _configure_document(document: Document) -> None:
             style,
             latin=BODY_FONT,
             east_asia=BODY_FONT_EAST_ASIA,
-            size=10.5,
+            size=12,
             color=DARK_TEXT,
         )
         style.paragraph_format.space_before = Pt(0)
-        style.paragraph_format.space_after = Pt(4)
-        style.paragraph_format.line_spacing = 1.25
+        style.paragraph_format.space_after = Pt(0)
+        style.paragraph_format.line_spacing = Pt(24)
+        style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
         style.paragraph_format.first_line_indent = None
         style.paragraph_format.widow_control = True
 
@@ -296,9 +297,9 @@ def _add_header_footer(document: Document, project_name: str) -> None:
 
         header = section.header
         header_table = header.add_table(rows=1, cols=2, width=Cm(15.7))
-        _set_table_geometry(header_table, [6800, 2101], indent=0)
+        _set_table_geometry(header_table, [6900, 2001], indent=0)
         _remove_table_borders(header_table)
-        _set_table_border_side(header_table, side="bottom", color="D8E0EA", size=4)
+        _set_table_border_side(header_table, side="bottom", color="BFBFBF", size=4)
         left_header, right_header = header_table.rows[0].cells
         for cell in (left_header, right_header):
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -314,28 +315,21 @@ def _add_header_footer(document: Document, project_name: str) -> None:
         right_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
         right_paragraph.paragraph_format.first_line_indent = None
         right_paragraph.paragraph_format.space_after = Pt(0)
-        right = right_paragraph.add_run("投标文件初稿")
-        _format_run(right, size=8.5, color=MUTED_TEXT, character_spacing=0.2)
+        right = right_paragraph.add_run("投标文件")
+        _format_run(right, size=8.5, color=MUTED_TEXT)
         header._element.remove(header.paragraphs[0]._p)
 
         footer = section.footer
-        table = footer.add_table(rows=1, cols=2, width=Cm(15.7))
-        _set_table_geometry(table, [6800, 2101], indent=0)
+        table = footer.add_table(rows=1, cols=3, width=Cm(15.7))
+        _set_table_geometry(table, [3000, 2901, 3000], indent=0)
         _remove_table_borders(table)
-        left_cell, right_cell = table.rows[0].cells
-        for cell in (left_cell, right_cell):
+        left_cell, center_cell, right_cell = table.rows[0].cells
+        for cell in (left_cell, center_cell, right_cell):
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             _set_cell_margins(cell, top=40, bottom=0, start=0, end=0)
 
-        note_paragraph = left_cell.paragraphs[0]
-        note_paragraph.paragraph_format.first_line_indent = None
-        note_paragraph.paragraph_format.space_before = Pt(2)
-        note_paragraph.paragraph_format.space_after = Pt(0)
-        note = note_paragraph.add_run("AI 辅助生成 · 人工复核后使用")
-        _format_run(note, size=8, color=MUTED_TEXT)
-
-        page_paragraph = right_cell.paragraphs[0]
-        page_paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        page_paragraph = center_cell.paragraphs[0]
+        page_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         page_paragraph.paragraph_format.space_before = Pt(2)
         page_paragraph.paragraph_format.space_after = Pt(0)
         _add_page_number(page_paragraph)
@@ -368,7 +362,7 @@ def _set_table_borders(table, color: str = BORDER) -> None:
             element = OxmlElement(f"w:{side}")
             borders.append(element)
         element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), "5")
+        element.set(qn("w:sz"), "6")
         element.set(qn("w:space"), "0")
         element.set(qn("w:color"), color)
 
@@ -481,9 +475,12 @@ def _style_table(
     widths: list[int],
     *,
     center_columns: set[int] | None = None,
+    nowrap_columns: set[int] | None = None,
     compact: bool = False,
+    shade_alternate_rows: bool = False,
 ) -> None:
     center_columns = center_columns or set()
+    nowrap_columns = nowrap_columns or set()
     table.style = "Table Grid"
     _set_table_geometry(table, widths)
     _set_table_borders(table)
@@ -492,16 +489,28 @@ def _style_table(
         _prevent_row_split(row)
         for column_index, cell in enumerate(row.cells):
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            _set_cell_margins(cell, top=65 if compact else 90, bottom=65 if compact else 90)
+            if column_index in nowrap_columns:
+                _set_cell_no_wrap(cell)
+            _set_cell_margins(
+                cell,
+                top=80 if compact else 110,
+                bottom=80 if compact else 110,
+                start=110 if compact else 140,
+                end=110 if compact else 140,
+            )
             if row_index == 0:
-                _set_cell_shading(cell, NAVY)
-            elif row_index % 2 == 0:
                 _set_cell_shading(cell, LIGHT_GRAY)
+                if len(cell.text.strip()) <= 6:
+                    _set_cell_no_wrap(cell)
+            elif shade_alternate_rows and row_index % 2 == 0:
+                _set_cell_shading(cell, PALE_GRAY)
+            else:
+                _set_cell_shading(cell, "FFFFFF")
             for paragraph in cell.paragraphs:
                 paragraph.paragraph_format.first_line_indent = None
-                paragraph.paragraph_format.space_before = Pt(0.5 if compact else 1.5)
-                paragraph.paragraph_format.space_after = Pt(0.5 if compact else 1.5)
-                paragraph.paragraph_format.line_spacing = 1.1 if compact else 1.15
+                paragraph.paragraph_format.space_before = Pt(0)
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.line_spacing = 1.2
                 paragraph.alignment = (
                     WD_ALIGN_PARAGRAPH.CENTER
                     if row_index == 0 or column_index in center_columns
@@ -510,124 +519,157 @@ def _style_table(
                 for run in paragraph.runs:
                     _format_run(
                         run,
-                        size=(9 if row_index else 9.3) if compact else (9.2 if row_index else 9.5),
+                        size=9.5 if compact else 10.5,
                         bold=True if row_index == 0 else None,
-                        color="FFFFFF" if row_index == 0 else DARK_TEXT,
+                        color=BLACK,
                     )
 
 
 def _column_widths(headers: list[str], rows: list[list[str]]) -> list[int]:
     column_count = len(headers)
-    minimum = 760 if column_count >= 5 else 900
-    text_lengths = []
+    if column_count == 1:
+        return [CONTENT_WIDTH_DXA]
+    narrow_headers = {"序号", "编号", "页码", "分值", "得分", "数量", "状态", "级别"}
+    minimums = [700 if header.strip() in narrow_headers else 1000 for header in headers]
+    if sum(minimums) >= CONTENT_WIDTH_DXA:
+        minimums = [CONTENT_WIDTH_DXA // column_count] * column_count
+    text_lengths: list[int] = []
     for index, header in enumerate(headers):
         values = [header, *[row[index] if index < len(row) else "" for row in rows]]
-        text_lengths.append(max(5, min(36, max(len(value) for value in values))))
-    remaining = CONTENT_WIDTH_DXA - minimum * column_count
+        if header.strip() in narrow_headers:
+            text_lengths.append(1)
+        else:
+            text_lengths.append(max(4, min(48, max(len(value) for value in values))))
+    remaining = CONTENT_WIDTH_DXA - sum(minimums)
     weight_total = sum(text_lengths)
-    widths = [minimum + int(remaining * weight / weight_total) for weight in text_lengths]
+    widths = [minimum + int(remaining * weight / weight_total) for minimum, weight in zip(minimums, text_lengths, strict=True)]
     widths[-1] += CONTENT_WIDTH_DXA - sum(widths)
     return widths
+
+
+def _center_columns(headers: list[str]) -> set[int]:
+    centered = {"序号", "编号", "页码", "分值", "得分", "数量", "状态", "级别", "是否响应"}
+    return {index for index, header in enumerate(headers) if header.strip() in centered}
 
 
 def _add_cover(document: Document, analysis: TenderAnalysis) -> None:
     project_name = analysis.project_info.project_name or "未命名投标项目"
 
-    kicker = document.add_paragraph()
-    kicker.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    kicker.paragraph_format.first_line_indent = None
-    kicker.paragraph_format.space_before = Pt(74)
-    kicker.paragraph_format.space_after = Pt(14)
-    kicker_run = kicker.add_run("投 标 响 应 文 件")
-    _format_run(
-        kicker_run,
-        latin=HEADING_FONT,
-        east_asia=HEADING_FONT_EAST_ASIA,
-        size=11.5,
-        bold=True,
-        color=BLUE,
-        character_spacing=1.5,
-    )
-
     title = document.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.first_line_indent = None
-    title.paragraph_format.space_after = Pt(10)
-    title.paragraph_format.line_spacing = 1.15
-    title_size = 28 if len(project_name) <= 18 else 24 if len(project_name) <= 30 else 20
+    title.paragraph_format.space_before = Pt(76)
+    title.paragraph_format.space_after = Pt(42)
+    title.paragraph_format.line_spacing = 1.3
+    title_size = 22 if len(project_name) <= 22 else 19 if len(project_name) <= 34 else 17
     title_run = title.add_run(project_name)
     _format_run(
         title_run,
-        latin=HEADING_FONT,
-        east_asia=HEADING_FONT_EAST_ASIA,
+        latin=COVER_FONT,
+        east_asia=COVER_FONT_EAST_ASIA,
         size=title_size,
         bold=True,
-        color=NAVY,
-        character_spacing=1.2,
+        color=BLACK,
+    )
+
+    document_type = document.add_paragraph()
+    document_type.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    document_type.paragraph_format.first_line_indent = None
+    document_type.paragraph_format.space_after = Pt(10)
+    document_type_run = document_type.add_run("投 标 文 件")
+    _format_run(
+        document_type_run,
+        latin=COVER_FONT,
+        east_asia=COVER_FONT_EAST_ASIA,
+        size=30,
+        bold=True,
+        color=BLACK,
+        character_spacing=2,
     )
 
     subtitle = document.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.paragraph_format.first_line_indent = None
-    subtitle.paragraph_format.space_after = Pt(34)
-    subtitle_run = subtitle.add_run("投标文件初稿")
+    subtitle.paragraph_format.space_after = Pt(88)
+    subtitle_run = subtitle.add_run("技术及商务响应文件")
     _format_run(
         subtitle_run,
         latin=HEADING_FONT,
         east_asia=HEADING_FONT_EAST_ASIA,
         size=16,
         bold=True,
-        color=MUTED_TEXT,
-        character_spacing=0.8,
+        color=BLACK,
     )
 
-    metadata = document.add_table(rows=2, cols=4)
-    _set_table_geometry(metadata, [1500, 2950, 1500, 2951], indent=0)
+    metadata = document.add_table(rows=4, cols=2)
+    _set_table_geometry(metadata, [2750, 6151], indent=0)
     _remove_table_borders(metadata)
     values = (
-        ("招标人", analysis.project_info.purchaser or "待确认", "预算/限价", analysis.project_info.budget or "待确认"),
-        ("投标截止", analysis.project_info.bid_deadline or "待确认", "生成日期", date.today().isoformat()),
+        ("项目名称：", project_name),
+        ("招标人：", analysis.project_info.purchaser or "________________"),
+        ("投标人（盖章）：", "________________"),
+        ("日  期：", date.today().strftime("%Y 年 %m 月 %d 日")),
     )
     for row, row_values in zip(metadata.rows, values, strict=True):
         for index, (cell, value) in enumerate(zip(row.cells, row_values, strict=True)):
             cell.text = value
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             _set_cell_margins(cell, top=100, bottom=100, start=80, end=80)
-            if index % 2 == 0:
+            if index == 0:
                 _set_cell_no_wrap(cell)
             paragraph = cell.paragraphs[0]
             paragraph.paragraph_format.first_line_indent = None
-            paragraph.paragraph_format.space_before = Pt(2)
-            paragraph.paragraph_format.space_after = Pt(2)
-            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT if index % 2 == 0 else WD_ALIGN_PARAGRAPH.LEFT
+            paragraph.paragraph_format.space_before = Pt(3)
+            paragraph.paragraph_format.space_after = Pt(3)
+            paragraph.paragraph_format.line_spacing = 1.25
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT if index == 0 else WD_ALIGN_PARAGRAPH.LEFT
+            if index == 1:
+                _set_paragraph_border(paragraph, side="bottom", color=BLACK, size=6, space=1)
             _format_run(
                 paragraph.runs[0],
-                size=9.5 if index % 2 == 0 else 10,
-                bold=index % 2 == 0,
-                color=MUTED_TEXT if index % 2 == 0 else DARK_TEXT,
+                size=12,
+                bold=index == 0,
+                color=BLACK,
             )
-
-    note = document.add_paragraph()
-    note.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    note.paragraph_format.first_line_indent = None
-    note.paragraph_format.left_indent = Cm(1.2)
-    note.paragraph_format.right_indent = Cm(1.2)
-    note.paragraph_format.space_before = Pt(42)
-    note.paragraph_format.space_after = Pt(0)
-    note.paragraph_format.line_spacing = 1.25
-    _set_paragraph_shading(note, LIGHT_RED)
-    _set_paragraph_border(note, side="left", color=RISK_RED, size=18, space=8)
-    note_run = note.add_run("本文件由 AI 辅助生成，须经投标负责人逐条复核后使用")
-    _format_run(note_run, size=9.5, bold=True, color=RISK_RED, character_spacing=0.2)
     document.add_page_break()
 
 
 def _strip_markdown(value: str) -> str:
+    value = re.sub(r"\[资料\s*\d+\]", "", value)
+    value = re.sub(r"\s+([，。；：！？])", r"\1", value)
     return re.sub(
         r"\*\*(.*?)\*\*|`([^`]*)`",
         lambda match: match.group(1) or match.group(2) or "",
         value,
     ).strip()
+
+
+def _sanitize_markdown(markdown: str) -> str:
+    lines = markdown.replace("\ufeff", "").splitlines()
+    cleaned: list[str] = []
+    first_content_seen = False
+    in_frontmatter = False
+    for line in lines:
+        stripped = line.strip()
+        if re.fullmatch(r"```[A-Za-z0-9_-]*", stripped):
+            continue
+        if not first_content_seen and not stripped:
+            continue
+        if not first_content_seen and stripped == "---":
+            first_content_seen = True
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        first_content_seen = True
+        if stripped == "---":
+            continue
+        cleaned.append(line)
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+    return "\n".join(cleaned)
 
 
 def _add_list_item(document: Document, text: str, *, num_id: int, ordered: bool) -> None:
@@ -639,20 +681,40 @@ def _add_list_item(document: Document, text: str, *, num_id: int, ordered: bool)
     _apply_numbering(paragraph, num_id)
 
 
-def _add_markdown(document: Document, markdown: str, *, bullet_num_id: int, decimal_num_id: int) -> None:
-    lines = markdown.splitlines()
+def _add_markdown(
+    document: Document,
+    markdown: str,
+    *,
+    bullet_num_id: int,
+    chapter_title: str = "",
+) -> None:
+    lines = _sanitize_markdown(markdown).splitlines()
     index = 0
+    last_content_kind = ""
+    ordered_num_id: int | None = None
+    title_skipped = False
     while index < len(lines):
         line = lines[index].rstrip()
         if not line:
             index += 1
             continue
+        heading_match = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if heading_match:
+            heading_text = _strip_markdown(heading_match.group(2))
+            if not title_skipped and chapter_title and heading_text.strip() == chapter_title.strip():
+                title_skipped = True
+                last_content_kind = "heading"
+                index += 1
+                continue
         if line.startswith("### "):
             document.add_heading(_strip_markdown(line[4:]), level=3)
+            last_content_kind = "heading"
         elif line.startswith("## "):
             document.add_heading(_strip_markdown(line[3:]), level=2)
+            last_content_kind = "heading"
         elif line.startswith("# "):
-            document.add_heading(_strip_markdown(line[2:]), level=1)
+            document.add_heading(_strip_markdown(line[2:]), level=2)
+            last_content_kind = "heading"
         elif line.startswith(("- ", "* ")):
             _add_list_item(
                 document,
@@ -660,13 +722,17 @@ def _add_markdown(document: Document, markdown: str, *, bullet_num_id: int, deci
                 num_id=bullet_num_id,
                 ordered=False,
             )
+            last_content_kind = "bullet"
         elif re.match(r"^\d+[.、]\s*", line):
+            if last_content_kind != "ordered" or ordered_num_id is None:
+                ordered_num_id = _create_numbering(document, ordered=True)
             _add_list_item(
                 document,
                 _strip_markdown(re.sub(r"^\d+[.、]\s*", "", line)),
-                num_id=decimal_num_id,
+                num_id=ordered_num_id,
                 ordered=True,
             )
+            last_content_kind = "ordered"
         elif "|" in line and index + 1 < len(lines) and re.fullmatch(
             r"\s*\|?[\s:|-]+\|?\s*", lines[index + 1]
         ):
@@ -683,14 +749,33 @@ def _add_markdown(document: Document, markdown: str, *, bullet_num_id: int, deci
                 cells = table.add_row().cells
                 for column in range(len(headers)):
                     cells[column].text = _strip_markdown(row[column] if column < len(row) else "")
-            _style_table(table, _column_widths(headers, rows))
+            _style_table(
+                table,
+                _column_widths(headers, rows),
+                center_columns=_center_columns(headers),
+                nowrap_columns=_center_columns(headers),
+            )
+            last_content_kind = "table"
             continue
+        elif line.lstrip().startswith(">"):
+            paragraph = document.add_paragraph(_strip_markdown(line.lstrip()[1:].strip()))
+            paragraph.paragraph_format.first_line_indent = None
+            paragraph.paragraph_format.left_indent = Cm(0.65)
+            paragraph.paragraph_format.right_indent = Cm(0.35)
+            paragraph.paragraph_format.space_before = Pt(6)
+            paragraph.paragraph_format.space_after = Pt(6)
+            paragraph.paragraph_format.line_spacing = 1.35
+            _set_paragraph_shading(paragraph, PALE_GRAY)
+            _set_paragraph_border(paragraph, side="left", color=BORDER, size=10, space=6)
+            last_content_kind = "quote"
         else:
             paragraph = document.add_paragraph(_strip_markdown(line))
-            paragraph.paragraph_format.first_line_indent = Cm(0.74)
-            paragraph.paragraph_format.space_after = Pt(6)
-            paragraph.paragraph_format.line_spacing = 1.5
+            paragraph.paragraph_format.first_line_indent = Cm(0.85)
+            paragraph.paragraph_format.space_after = Pt(0)
+            paragraph.paragraph_format.line_spacing = Pt(26)
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.EXACTLY
             paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            last_content_kind = "paragraph"
         index += 1
 
 
@@ -700,8 +785,8 @@ def _add_analysis_appendix(
     *,
     bullet_num_id: int,
 ) -> None:
-    document.add_page_break()
-    document.add_heading("生成依据与待核对事项", level=1)
+    heading = document.add_heading("内部核对事项", level=1)
+    heading.paragraph_format.page_break_before = True
 
     document.add_heading("强制要求", level=2)
     for item in analysis.mandatory_requirements:
@@ -738,19 +823,19 @@ def _add_analysis_appendix(
 
 
 def _add_review_appendix(document: Document, review: ReviewReport) -> None:
-    document.add_page_break()
-    document.add_heading("自动复核报告", level=1)
+    heading = document.add_heading("内部复核报告", level=1)
+    heading.paragraph_format.page_break_before = True
     summary = document.add_paragraph()
     summary.paragraph_format.first_line_indent = None
     summary.paragraph_format.space_before = Pt(2)
     summary.paragraph_format.space_after = Pt(10)
     summary.paragraph_format.line_spacing = 1.3
-    _set_paragraph_shading(summary, LIGHT_BLUE if review.severity_count("高") == 0 else LIGHT_RED)
+    _set_paragraph_shading(summary, LIGHT_GRAY)
     _set_paragraph_border(
         summary,
         side="left",
-        color=BLUE if review.severity_count("高") == 0 else RISK_RED,
-        size=16,
+        color=BORDER,
+        size=10,
         space=8,
     )
     summary_run = summary.add_run(
@@ -761,7 +846,7 @@ def _add_review_appendix(document: Document, review: ReviewReport) -> None:
         summary_run,
         size=10,
         bold=True,
-        color=RISK_RED if review.severity_count("高") else NAVY,
+        color=BLACK,
     )
     if not review.issues:
         document.add_paragraph("当前规则未发现问题，仍需由投标负责人完成最终审核。")
@@ -784,43 +869,42 @@ def _add_review_appendix(document: Document, review: ReviewReport) -> None:
         cells[3].text = item.status
     _style_table(
         table,
-        [1500, 5000, 700, 1701],
+        [1500, 4700, 1200, 1501],
         center_columns={0, 2, 3},
+        nowrap_columns={2, 3},
         compact=True,
     )
     for row, issue in zip(table.rows[1:], review.issues, strict=True):
         if issue.severity == "高":
-            for cell in row.cells:
-                _set_cell_shading(cell, LIGHT_RED)
             for run in row.cells[0].paragraphs[0].runs:
-                _format_run(run, size=9.2, bold=True, color=RISK_RED)
+                _format_run(run, size=9.5, bold=True, color=BLACK)
 
 
 def _add_contents(document: Document, drafts: list[ChapterDraft]) -> None:
     heading = document.add_paragraph()
     heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
     heading.paragraph_format.first_line_indent = None
-    heading.paragraph_format.space_before = Pt(8)
-    heading.paragraph_format.space_after = Pt(20)
+    heading.paragraph_format.space_before = Pt(30)
+    heading.paragraph_format.space_after = Pt(26)
     run = heading.add_run("目 录")
     _format_run(
         run,
         latin=HEADING_FONT,
         east_asia=HEADING_FONT_EAST_ASIA,
-        size=20,
+        size=18,
         bold=True,
-        color=NAVY,
-        character_spacing=1.5,
+        color=BLACK,
+        character_spacing=1,
     )
     for index, draft in enumerate(drafts, start=1):
         entry = document.add_paragraph()
         entry.paragraph_format.first_line_indent = None
-        entry.paragraph_format.left_indent = Cm(1.2)
-        entry.paragraph_format.right_indent = Cm(1.2)
-        entry.paragraph_format.space_after = Pt(7)
-        entry.paragraph_format.line_spacing = 1.25
+        entry.paragraph_format.left_indent = Cm(0.8)
+        entry.paragraph_format.right_indent = Cm(0.8)
+        entry.paragraph_format.space_after = Pt(8)
+        entry.paragraph_format.line_spacing = 1.4
         entry_run = entry.add_run(f"第 {index} 章  {draft.title}")
-        _format_run(entry_run, size=11, color=DARK_TEXT, character_spacing=0.2)
+        _format_run(entry_run, size=12, color=BLACK)
     document.add_page_break()
 
 
@@ -892,9 +976,9 @@ def _add_qualification_images(document: Document, image_paths: list[Path]) -> No
     valid_paths = [Path(path) for path in image_paths if Path(path).is_file()]
     if not valid_paths:
         return
-    document.add_page_break()
-    document.add_heading("资质证明材料", level=1)
-    intro = document.add_paragraph("以下资质图片由系统按文件顺序自动编排，提交前请人工核对证书名称、有效期和清晰度。")
+    heading = document.add_heading("资质证明材料", level=1)
+    heading.paragraph_format.page_break_before = True
+    intro = document.add_paragraph("本章按材料顺序编排资质证明文件。")
     intro.paragraph_format.first_line_indent = None
     intro.paragraph_format.space_after = Pt(12)
 
@@ -928,7 +1012,7 @@ def _add_qualification_images(document: Document, image_paths: list[Path]) -> No
         caption.paragraph_format.first_line_indent = None
         caption.paragraph_format.space_after = Pt(4)
         caption_text = re.sub(r"[_-]+", " ", path.stem).strip() or f"资质材料 {index + 1}"
-        _format_run(caption.add_run(caption_text), size=9.2, color=MUTED_TEXT)
+        _format_run(caption.add_run(caption_text), size=10, color=BLACK)
 
 
 def _add_generated_sections(
@@ -939,24 +1023,25 @@ def _add_generated_sections(
     qualification_images: list[Path],
     *,
     include_contents: bool,
+    include_internal_appendices: bool,
 ) -> None:
     bullet_num_id = _create_numbering(document, ordered=False)
-    decimal_num_id = _create_numbering(document, ordered=True)
     if include_contents:
         _add_contents(document, drafts)
     for index, draft in enumerate(drafts, start=1):
-        document.add_heading(f"第 {index} 章 {draft.title}", level=1)
+        heading = document.add_heading(f"第 {index} 章 {draft.title}", level=1)
+        if index > 1:
+            heading.paragraph_format.page_break_before = True
         _add_markdown(
             document,
             draft.markdown,
             bullet_num_id=bullet_num_id,
-            decimal_num_id=decimal_num_id,
+            chapter_title=draft.title,
         )
-        if index < len(drafts):
-            document.add_page_break()
-    _add_analysis_appendix(document, analysis, bullet_num_id=bullet_num_id)
-    if review is not None:
-        _add_review_appendix(document, review)
+    if include_internal_appendices:
+        _add_analysis_appendix(document, analysis, bullet_num_id=bullet_num_id)
+        if review is not None:
+            _add_review_appendix(document, review)
     _add_qualification_images(document, qualification_images)
 
 
@@ -966,6 +1051,8 @@ def _insert_template_content(
     drafts: list[ChapterDraft],
     review: ReviewReport | None,
     qualification_images: list[Path],
+    *,
+    include_internal_appendices: bool,
 ) -> None:
     placeholder = next(
         (paragraph for paragraph in document.paragraphs if paragraph.text.strip() == "{{BID_CONTENT}}"),
@@ -980,6 +1067,7 @@ def _insert_template_content(
         review,
         qualification_images,
         include_contents=True,
+        include_internal_appendices=include_internal_appendices,
     )
     if placeholder is None:
         return
@@ -1000,6 +1088,7 @@ def export_docx(
     *,
     template_path: str | Path | None = None,
     qualification_images: list[str | Path] | None = None,
+    include_internal_appendices: bool = False,
 ) -> Path:
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1008,12 +1097,19 @@ def export_docx(
     if not template_path:
         _configure_document(document)
     document.core_properties.title = analysis.project_info.project_name or "投标文件初稿"
-    document.core_properties.subject = "AI 辅助生成的可复核投标文件初稿"
-    document.core_properties.author = "投标初稿助手"
+    document.core_properties.subject = "投标响应文件"
+    document.core_properties.author = ""
 
     if template_path:
         _apply_template_placeholders(document, analysis)
-        _insert_template_content(document, analysis, drafts, review, images)
+        _insert_template_content(
+            document,
+            analysis,
+            drafts,
+            review,
+            images,
+            include_internal_appendices=include_internal_appendices,
+        )
     else:
         _add_cover(document, analysis)
         _add_contents(document, drafts)
@@ -1024,6 +1120,7 @@ def export_docx(
             review,
             images,
             include_contents=False,
+            include_internal_appendices=include_internal_appendices,
         )
         _add_header_footer(document, analysis.project_info.project_name or "未命名投标项目")
     document.save(target)

@@ -1237,6 +1237,12 @@ with tab_export:
             value=True,
             key=f"use_word_template_{current_id}",
         )
+        include_internal_appendices = st.checkbox(
+            "附带内部核对与复核附录",
+            value=False,
+            key=f"include_internal_appendices_{current_id}",
+            help="仅供内部评审使用。正式投标文件建议保持关闭，复核结果仍保留在系统中。",
+        )
         st.caption(f"本次将自动编排 {len(qualification_images)} 张资质图片。")
         version_note = st.text_input(
             "版本说明",
@@ -1260,6 +1266,7 @@ with tab_export:
                     review,
                     template_path=template if use_template else None,
                     qualification_images=qualification_images,
+                    include_internal_appendices=include_internal_appendices,
                 )
                 store.record_export_version(
                     current_id,

@@ -168,23 +168,26 @@ def verify_docx_output(
     normal_font_ok = bool(
         normal is not None
         and normal.font.size is not None
-        and abs(normal.font.size.pt - 10.5) <= 0.2
+        and abs(normal.font.size.pt - 12) <= 0.2
     )
+    normal_spacing = normal.paragraph_format.line_spacing if normal is not None else None
     normal_spacing_ok = bool(
-        normal is not None and normal.paragraph_format.line_spacing == 1.5
+        normal_spacing is not None
+        and hasattr(normal_spacing, "pt")
+        and abs(normal_spacing.pt - 26) <= 0.2
     )
     normal_east_asia_ok = bool(
         normal is not None and 'w:eastAsia="宋体"' in normal._element.xml
     )
     if not normal_font_ok or not normal_east_asia_ok:
-        warnings.append("正文样式不是宋体 10.5 磅。")
+        warnings.append("正文样式不是宋体小四（12 磅）。")
     if not normal_spacing_ok:
-        warnings.append("正文样式不是 1.5 倍行距。")
+        warnings.append("正文样式不是固定值 26 磅行距。")
     checks.append(
         {
             "label": "正文样式",
             "status": "pass" if normal_font_ok and normal_spacing_ok and normal_east_asia_ok else "warning",
-            "detail": "宋体 10.5 磅、1.5 倍行距。",
+            "detail": "宋体小四（12 磅）、固定值 26 磅行距。",
         }
     )
 
@@ -267,7 +270,7 @@ def verify_docx_output(
         }
     )
 
-    if not template_mode and "投 标 响 应 文 件" not in text:
+    if not template_mode and "投 标 文 件" not in text:
         warnings.append("未识别到系统标准封面标题。")
     if "目 录" not in text:
         warnings.append("未识别到目录标题。")
