@@ -13,7 +13,7 @@ from docx.shared import Cm
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _CHAPTER_HEADING_PATTERN = re.compile(r"^第\s*\d+\s*章")
-_PLACEHOLDER_PATTERN = re.compile(r"待补充|待确认(?!项)|待核对(?!事项)|【[^】]{0,80}】")
+_PLACEHOLDER_PATTERN = re.compile(r"待补充|待确认(?!项)|待核对(?!事项)|【[^】]{0,80}】|\{\{[A-Z_]+\}\}")
 _REQUIRED_PARTS = {"[Content_Types].xml", "word/document.xml", "word/styles.xml"}
 
 
@@ -42,6 +42,7 @@ def verify_docx_output(
     *,
     expected_sha256: str = "",
     expected_chapter_count: int = 0,
+    template_mode: bool = False,
 ) -> dict:
     target = Path(docx_path)
     result = {
@@ -59,6 +60,7 @@ def verify_docx_output(
         "errors": [],
         "warnings": [],
         "checks": [],
+        "template_mode": template_mode,
     }
     errors: list[str] = result["errors"]
     warnings: list[str] = result["warnings"]
@@ -138,12 +140,21 @@ def verify_docx_output(
         )
         if not all(_is_close(value, expected, Cm(0.25)) for value, expected in expected_margins):
             margin_warnings += 1
-    if document.sections and a4_sections != len(document.sections):
-        errors.append(f"有 {len(document.sections) - a4_sections} 个分节不是 A4 纵向页面。")
+    non_a4_sections = len(document.sections) - a4_sections
+    if document.sections and non_a4_sections:
+        message = f"有 {non_a4_sections} 个分节不是 A4 纵向页面。"
+        if template_mode:
+            warnings.append(f"模板版式提示：{message}")
+        else:
+            errors.append(message)
     checks.append(
         {
             "label": "页面规格",
-            "status": "pass" if document.sections and a4_sections == len(document.sections) else "block",
+            "status": (
+                "pass"
+                if document.sections and a4_sections == len(document.sections)
+                else "warning" if template_mode and document.sections else "block"
+            ),
             "detail": f"A4 分节 {a4_sections}/{len(document.sections)}。",
         }
     )
@@ -256,7 +267,7 @@ def verify_docx_output(
         }
     )
 
-    if "投 标 响 应 文 件" not in text:
+    if not template_mode and "投 标 响 应 文 件" not in text:
         warnings.append("未识别到系统标准封面标题。")
     if "目 录" not in text:
         warnings.append("未识别到目录标题。")

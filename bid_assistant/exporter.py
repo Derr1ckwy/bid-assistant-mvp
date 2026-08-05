@@ -10,6 +10,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
+from PIL import Image
 
 from bid_assistant.models import ChapterDraft, ReviewReport, TenderAnalysis
 
@@ -421,13 +422,14 @@ def _set_cell_no_wrap(cell) -> None:
 
 
 def _set_table_geometry(table, widths: list[int], *, indent: int = TABLE_INDENT_DXA) -> None:
-    if sum(widths) != CONTENT_WIDTH_DXA:
-        raise ValueError("Table widths must match the document content width")
+    total_width = sum(widths)
+    if total_width <= 0 or len(widths) != len(table.columns):
+        raise ValueError("Table widths must be positive and match the column count")
     table.alignment = WD_TABLE_ALIGNMENT.LEFT
     table.autofit = False
     tbl_pr = table._tbl.tblPr
     for tag, attributes in (
-        ("w:tblW", {"w:w": str(CONTENT_WIDTH_DXA), "w:type": "dxa"}),
+        ("w:tblW", {"w:w": str(total_width), "w:type": "dxa"}),
         ("w:tblInd", {"w:w": str(indent), "w:type": "dxa"}),
         ("w:tblLayout", {"w:type": "fixed"}),
     ):
@@ -822,25 +824,126 @@ def _add_contents(document: Document, drafts: list[ChapterDraft]) -> None:
     document.add_page_break()
 
 
-def export_docx(
-    output_path: str | Path,
+def _iter_table_paragraphs(table):
+    for row in table.rows:
+        for cell in row.cells:
+            yield from cell.paragraphs
+            for nested in cell.tables:
+                yield from _iter_table_paragraphs(nested)
+
+
+def _iter_all_paragraphs(document: Document):
+    yield from document.paragraphs
+    for table in document.tables:
+        yield from _iter_table_paragraphs(table)
+    for section in document.sections:
+        for container in (
+            section.header,
+            section.first_page_header,
+            section.even_page_header,
+            section.footer,
+            section.first_page_footer,
+            section.even_page_footer,
+        ):
+            yield from container.paragraphs
+            for table in container.tables:
+                yield from _iter_table_paragraphs(table)
+
+
+def _replace_paragraph_text(paragraph, placeholder: str, value: str) -> None:
+    if placeholder not in paragraph.text:
+        return
+    for run in paragraph.runs:
+        if placeholder in run.text:
+            run.text = run.text.replace(placeholder, value)
+            return
+    start = paragraph.text.find(placeholder)
+    end = start + len(placeholder)
+    offset = 0
+    started = False
+    for run in paragraph.runs:
+        run_start = offset
+        run_end = offset + len(run.text)
+        offset = run_end
+        if run_end <= start or run_start >= end:
+            continue
+        prefix = run.text[: max(0, start - run_start)] if not started else ""
+        suffix = run.text[max(0, end - run_start) :] if run_end >= end else ""
+        run.text = f"{prefix}{value if not started else ''}{suffix}"
+        started = True
+
+
+def _apply_template_placeholders(document: Document, analysis: TenderAnalysis) -> None:
+    info = analysis.project_info
+    replacements = {
+        "{{PROJECT_NAME}}": info.project_name,
+        "{{PURCHASER}}": info.purchaser,
+        "{{AGENCY}}": info.agency,
+        "{{BUDGET}}": info.budget,
+        "{{BID_DEADLINE}}": info.bid_deadline,
+        "{{GENERATED_DATE}}": date.today().isoformat(),
+    }
+    for paragraph in _iter_all_paragraphs(document):
+        for placeholder, value in replacements.items():
+            _replace_paragraph_text(paragraph, placeholder, value or "")
+
+
+def _add_qualification_images(document: Document, image_paths: list[Path]) -> None:
+    valid_paths = [Path(path) for path in image_paths if Path(path).is_file()]
+    if not valid_paths:
+        return
+    document.add_page_break()
+    document.add_heading("资质证明材料", level=1)
+    intro = document.add_paragraph("以下资质图片由系统按文件顺序自动编排，提交前请人工核对证书名称、有效期和清晰度。")
+    intro.paragraph_format.first_line_indent = None
+    intro.paragraph_format.space_after = Pt(12)
+
+    section = document.sections[-1]
+    usable_width_dxa = max(
+        3000,
+        int((section.page_width - section.left_margin - section.right_margin) / 635),
+    )
+    first_column = usable_width_dxa // 2
+    table = document.add_table(rows=(len(valid_paths) + 1) // 2, cols=2)
+    _style_table(table, [first_column, usable_width_dxa - first_column], compact=True)
+    for row in table.rows:
+        for cell in row.cells:
+            _set_cell_shading(cell, "FFFFFF")
+    for index, path in enumerate(valid_paths):
+        cell = table.cell(index // 2, index % 2)
+        cell.text = ""
+        picture_paragraph = cell.paragraphs[0]
+        picture_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture_paragraph.paragraph_format.first_line_indent = None
+        picture_paragraph.paragraph_format.space_after = Pt(5)
+        with Image.open(path) as image:
+            width_px, height_px = image.size
+        max_width_cm = min(7.0, max(3.0, first_column * 2.54 / 1440 - 0.8))
+        scale = min(max_width_cm / max(width_px, 1), 9.8 / max(height_px, 1))
+        width_cm = max(1.0, width_px * scale)
+        height_cm = max(1.0, height_px * scale)
+        picture_paragraph.add_run().add_picture(str(path), width=Cm(width_cm), height=Cm(height_cm))
+        caption = cell.add_paragraph()
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.first_line_indent = None
+        caption.paragraph_format.space_after = Pt(4)
+        caption_text = re.sub(r"[_-]+", " ", path.stem).strip() or f"资质材料 {index + 1}"
+        _format_run(caption.add_run(caption_text), size=9.2, color=MUTED_TEXT)
+
+
+def _add_generated_sections(
+    document: Document,
     analysis: TenderAnalysis,
     drafts: list[ChapterDraft],
-    review: ReviewReport | None = None,
-) -> Path:
-    target = Path(output_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    document = Document()
-    _configure_document(document)
-    document.core_properties.title = analysis.project_info.project_name or "投标文件初稿"
-    document.core_properties.subject = "AI 辅助生成的可复核投标文件初稿"
-    document.core_properties.author = "投标初稿助手"
-
+    review: ReviewReport | None,
+    qualification_images: list[Path],
+    *,
+    include_contents: bool,
+) -> None:
     bullet_num_id = _create_numbering(document, ordered=False)
     decimal_num_id = _create_numbering(document, ordered=True)
-    _add_cover(document, analysis)
-    _add_contents(document, drafts)
-
+    if include_contents:
+        _add_contents(document, drafts)
     for index, draft in enumerate(drafts, start=1):
         document.add_heading(f"第 {index} 章 {draft.title}", level=1)
         _add_markdown(
@@ -851,10 +954,77 @@ def export_docx(
         )
         if index < len(drafts):
             document.add_page_break()
-
     _add_analysis_appendix(document, analysis, bullet_num_id=bullet_num_id)
     if review is not None:
         _add_review_appendix(document, review)
-    _add_header_footer(document, analysis.project_info.project_name or "未命名投标项目")
+    _add_qualification_images(document, qualification_images)
+
+
+def _insert_template_content(
+    document: Document,
+    analysis: TenderAnalysis,
+    drafts: list[ChapterDraft],
+    review: ReviewReport | None,
+    qualification_images: list[Path],
+) -> None:
+    placeholder = next(
+        (paragraph for paragraph in document.paragraphs if paragraph.text.strip() == "{{BID_CONTENT}}"),
+        None,
+    )
+    body = document._element.body
+    existing = set(body.iterchildren())
+    _add_generated_sections(
+        document,
+        analysis,
+        drafts,
+        review,
+        qualification_images,
+        include_contents=True,
+    )
+    if placeholder is None:
+        return
+    new_elements = [
+        element for element in body.iterchildren()
+        if element not in existing and element.tag != qn("w:sectPr")
+    ]
+    for element in new_elements:
+        placeholder._p.addprevious(element)
+    body.remove(placeholder._p)
+
+
+def export_docx(
+    output_path: str | Path,
+    analysis: TenderAnalysis,
+    drafts: list[ChapterDraft],
+    review: ReviewReport | None = None,
+    *,
+    template_path: str | Path | None = None,
+    qualification_images: list[str | Path] | None = None,
+) -> Path:
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    images = [Path(path) for path in qualification_images or []]
+    document = Document(str(template_path)) if template_path else Document()
+    if not template_path:
+        _configure_document(document)
+    document.core_properties.title = analysis.project_info.project_name or "投标文件初稿"
+    document.core_properties.subject = "AI 辅助生成的可复核投标文件初稿"
+    document.core_properties.author = "投标初稿助手"
+
+    if template_path:
+        _apply_template_placeholders(document, analysis)
+        _insert_template_content(document, analysis, drafts, review, images)
+    else:
+        _add_cover(document, analysis)
+        _add_contents(document, drafts)
+        _add_generated_sections(
+            document,
+            analysis,
+            drafts,
+            review,
+            images,
+            include_contents=False,
+        )
+        _add_header_footer(document, analysis.project_info.project_name or "未命名投标项目")
     document.save(target)
     return target

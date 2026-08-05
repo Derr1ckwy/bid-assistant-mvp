@@ -2,6 +2,7 @@ import hashlib
 from pathlib import Path
 
 from docx import Document
+from docx.shared import Cm
 
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
 from bid_assistant.exporter import export_docx
@@ -120,3 +121,26 @@ def test_word_quality_reports_missing_chapters_and_placeholders(tmp_path: Path) 
     assert any("少于版本记录" in item for item in quality["errors"])
     assert any("不是 A4" in item for item in quality["errors"])
     assert any("占位内容" in item for item in quality["warnings"])
+
+
+def test_template_mode_allows_template_page_geometry_but_keeps_warning(tmp_path: Path) -> None:
+    target = tmp_path / "模板输出.docx"
+    document = Document()
+    document.sections[0].page_width = Cm(21.59)
+    document.sections[0].page_height = Cm(27.94)
+    document.add_heading("第 1 章 技术方案", level=1)
+    document.add_paragraph("模板正文")
+    document.save(target)
+    checksum = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    quality = verify_docx_output(
+        target,
+        expected_sha256=checksum,
+        expected_chapter_count=1,
+        template_mode=True,
+    )
+
+    assert quality["valid"] is True
+    assert any("模板版式提示" in item for item in quality["warnings"])
+    page_check = next(item for item in quality["checks"] if item["label"] == "页面规格")
+    assert page_check["status"] == "warning"

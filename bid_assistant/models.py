@@ -27,6 +27,7 @@ class ParsedDocument(BaseModel):
     full_text: str = ""
     char_count: int = 0
     possible_scanned_document: bool = False
+    parser_engine: str = "native"
     warnings: list[str] = Field(default_factory=list)
 
 

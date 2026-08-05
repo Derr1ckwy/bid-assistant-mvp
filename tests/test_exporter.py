@@ -3,6 +3,7 @@ from pathlib import Path
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Cm
+from PIL import Image
 
 from bid_assistant.exporter import export_docx
 from bid_assistant.models import (
@@ -105,3 +106,33 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
         width = table._tbl.tblPr.find(qn("w:tblW"))
         assert layout is not None and layout.get(qn("w:type")) == "fixed"
         assert width is not None and width.get(qn("w:type")) == "dxa"
+
+
+def test_export_uses_real_template_and_appends_qualification_images(tmp_path: Path) -> None:
+    template = tmp_path / "客户模板.docx"
+    template_document = Document()
+    header = template_document.sections[0].header.paragraphs[0]
+    header.add_run("{{PROJECT_").bold = True
+    header.add_run("NAME}}")
+    header.add_run(" | ")
+    header.add_run("{{PURCHASER}}")
+    template_document.add_paragraph("项目预算：{{BUDGET}}")
+    template_document.add_paragraph("{{BID_CONTENT}}")
+    template_document.save(template)
+    image_path = tmp_path / "信息安全认证.png"
+    Image.new("RGB", (640, 420), "white").save(image_path)
+    output = tmp_path / "template-output.docx"
+    analysis = TenderAnalysis(project_info=ProjectInfo(project_name="模板适配项目", purchaser="采购人", budget="100 万元"))
+    drafts = [ChapterDraft(chapter_id="c1", title="实施方案", markdown="## 项目理解\n\n正文内容。")]
+
+    export_docx(output, analysis, drafts, ReviewReport(), template_path=template, qualification_images=[image_path])
+    reopened = Document(output)
+    body_text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
+
+    assert "项目预算：100 万元" in body_text
+    assert "{{BID_CONTENT}}" not in body_text
+    assert "第 1 章 实施方案" in body_text
+    assert "资质证明材料" in body_text
+    assert "模板适配项目 | 采购人" in reopened.sections[0].header.paragraphs[0].text
+    assert reopened.sections[0].header.paragraphs[0].runs[0].bold is True
+    assert len(reopened.inline_shapes) == 1

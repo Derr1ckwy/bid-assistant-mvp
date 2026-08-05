@@ -185,7 +185,7 @@ def _parse_json(path: Path) -> tuple[list[ParsedPage], list[str]]:
     return [ParsedPage(page_number=1, text="\n".join(lines))], warnings
 
 
-def parse_document(path: str | Path) -> ParsedDocument:
+def _parse_document_native(path: str | Path) -> ParsedDocument:
     source = Path(path)
     suffix = source.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
@@ -225,15 +225,41 @@ def parse_document(path: str | Path) -> ParsedDocument:
         full_text=full_text,
         char_count=char_count,
         possible_scanned_document=possible_scanned,
+        parser_engine="native",
         warnings=warnings,
     )
 
 
-def parse_document_bytes(filename: str, content: bytes) -> ParsedDocument:
+def parse_document(path: str | Path, *, mode: str = "native", mineru_client=None) -> ParsedDocument:
+    if mode not in {"native", "auto", "mineru"}:
+        raise ValueError("Invalid parser mode")
+    native = _parse_document_native(path)
+    should_try_mineru = mode == "mineru" or (
+        mode == "auto" and native.file_type == "pdf" and native.possible_scanned_document
+    )
+    if not should_try_mineru:
+        return native
+    if mineru_client is None:
+        from bid_assistant.config import settings
+        from bid_assistant.ocr import MinerUClient
+
+        mineru_client = MinerUClient(settings)
+    try:
+        enhanced = mineru_client.parse(path)
+        if enhanced.char_count <= native.char_count and native.full_text.strip():
+            native.warnings.append("MinerU 未提取出更多有效文本，本次保留原生解析结果。")
+            return native
+        return enhanced
+    except Exception as exc:
+        native.warnings.append(f"MinerU 增强解析不可用，已保留原生结果：{exc}")
+        return native
+
+
+def parse_document_bytes(filename: str, content: bytes, *, mode: str = "native", mineru_client=None) -> ParsedDocument:
     safe_name = Path(filename).name
     if not safe_name:
         raise DocumentParseError("文件名为空。")
     with TemporaryDirectory(prefix="bid-assistant-parse-") as temporary_dir:
         path = Path(temporary_dir) / safe_name
         path.write_bytes(content)
-        return parse_document(path)
+        return parse_document(path, mode=mode, mineru_client=mineru_client)

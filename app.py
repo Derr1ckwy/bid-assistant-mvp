@@ -28,6 +28,7 @@ from bid_assistant.models import (
     SubmissionItem,
     TenderAnalysis,
 )
+from bid_assistant.ocr import MinerUClient
 from bid_assistant.packager import (
     build_package_readiness,
     build_package_verification_report,
@@ -268,6 +269,7 @@ def _verify_docx_cached(
     path_value: str,
     expected_sha256: str,
     expected_chapter_count: int,
+    template_mode: bool,
     file_size: int,
     modified_ns: int,
 ) -> dict:
@@ -276,6 +278,7 @@ def _verify_docx_cached(
         path_value,
         expected_sha256=expected_sha256,
         expected_chapter_count=expected_chapter_count,
+        template_mode=template_mode,
     )
 
 
@@ -469,6 +472,14 @@ tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export, t
 
 with tab_upload:
     st.subheader("上传并解析招标文件")
+    parser_mode_label = st.radio(
+        "解析方式",
+        ["自动识别", "快速解析", "MinerU 增强"],
+        horizontal=True,
+        key=f"parser_mode_{current_id}",
+        help="自动识别会先快速解析，仅在扫描 PDF 文本过少时调用 MinerU。",
+    )
+    parser_mode = {"自动识别": "auto", "快速解析": "native", "MinerU 增强": "mineru"}[parser_mode_label]
     uploaded = st.file_uploader(
         "支持 PDF、DOCX、TXT、Markdown",
         type=[extension.lstrip(".") for extension in sorted(TENDER_EXTENSIONS)],
@@ -477,7 +488,7 @@ with tab_upload:
     if st.button("保存并解析", type="primary", disabled=uploaded is None, key=f"parse_{current_id}"):
         try:
             path = store.save_source(current_id, uploaded.name, uploaded.getvalue())
-            parsed = parse_document(path)
+            parsed = parse_document(path, mode=parser_mode, mineru_client=MinerUClient(settings))
             store.save_json(current_id, "parsed", parsed.model_dump())
             store.update_project(current_id, status="parsed")
             st.success("解析完成")
@@ -488,10 +499,11 @@ with tab_upload:
     parsed_payload = store.load_json(current_id, "parsed")
     if parsed_payload:
         parsed = ParsedDocument.model_validate(parsed_payload)
-        columns = st.columns(3)
+        columns = st.columns(4)
         columns[0].metric("字符数", parsed.char_count)
         columns[1].metric("页数", len(parsed.pages))
         columns[2].metric("扫描件风险", "是" if parsed.possible_scanned_document else "否")
+        columns[3].metric("解析引擎", "MinerU" if parsed.parser_engine == "mineru" else "原生")
         for warning in parsed.warnings:
             st.warning(warning)
         with st.expander("查看解析文本"):
@@ -771,6 +783,101 @@ with tab_analysis:
 with tab_knowledge:
     st.subheader("项目知识资料")
     st.caption("第一版只保留企业资料、产品资料、历史方案三类，避免知识库结构过度复杂。")
+
+    st.markdown("#### Word 模板")
+    template = store.word_template_path(current_id)
+    template_upload = st.file_uploader(
+        "上传甲方或公司 DOCX 模板",
+        type=["docx"],
+        key=(
+            f"word_template_upload_{current_id}_"
+            f"{st.session_state.get(f'word_template_upload_nonce_{current_id}', 0)}"
+        ),
+        help="支持 {{PROJECT_NAME}}、{{PURCHASER}}、{{AGENCY}}、{{BUDGET}}、{{BID_DEADLINE}}、{{GENERATED_DATE}}、{{BID_CONTENT}}。",
+    )
+    template_actions = st.columns([2, 2, 5])
+    if template_actions[0].button(
+        "保存模板",
+        disabled=template_upload is None,
+        key=f"save_word_template_{current_id}",
+        icon=":material/upload_file:",
+    ):
+        try:
+            saved_template = store.save_word_template(current_id, template_upload.name, template_upload.getvalue())
+            nonce_key = f"word_template_upload_nonce_{current_id}"
+            st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
+            st.session_state["project_flash"] = f"已保存 Word 模板：{saved_template.name}"
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    if template:
+        template_actions[1].download_button(
+            "下载模板",
+            data=template.read_bytes(),
+            file_name=template.name,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"download_word_template_{current_id}",
+            icon=":material/download:",
+        )
+        st.caption(f"当前模板：{template.name}")
+        if st.button(
+            "删除当前模板",
+            key=f"delete_word_template_{current_id}",
+            icon=":material/delete:",
+        ):
+            store.delete_word_template(current_id)
+            st.session_state["project_flash"] = "已删除 Word 模板"
+            st.rerun()
+    else:
+        st.caption("尚未上传模板，导出时使用系统默认精排版。")
+
+    st.markdown("#### 资质图片")
+    qualification_uploads = st.file_uploader(
+        "上传营业执照、认证证书、资质证明图片",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=(
+            f"qualification_images_{current_id}_"
+            f"{st.session_state.get(f'qualification_images_nonce_{current_id}', 0)}"
+        ),
+    )
+    if st.button(
+        "保存资质图片",
+        disabled=not qualification_uploads,
+        key=f"save_qualification_images_{current_id}",
+        icon=":material/add_photo_alternate:",
+    ):
+        saved_count = 0
+        for item in qualification_uploads:
+            try:
+                store.save_qualification_image(current_id, item.name, item.getvalue())
+                saved_count += 1
+            except ValueError as exc:
+                st.error(f"{item.name}：{exc}")
+        if saved_count:
+            nonce_key = f"qualification_images_nonce_{current_id}"
+            st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
+            st.session_state["project_flash"] = f"已保存 {saved_count} 张资质图片"
+            st.rerun()
+    qualification_images = store.list_qualification_images(current_id)
+    if qualification_images:
+        for image_path in qualification_images:
+            image_columns = st.columns([1, 5, 1])
+            image_columns[0].image(str(image_path), width=88)
+            image_columns[1].write(f"{image_path.name} · {image_path.stat().st_size / 1024:.1f} KB")
+            if image_columns[2].button(
+                "删除",
+                key=f"delete_qualification_image_{current_id}_{image_path.name}",
+                icon=":material/delete:",
+            ):
+                store.delete_qualification_image(current_id, image_path.name)
+                st.session_state["project_flash"] = f"已删除资质图片：{image_path.name}"
+                st.rerun()
+    else:
+        st.caption("暂无资质图片。上传后会在 Word 末尾自动生成两列资质证明材料。")
+
+    st.divider()
+    st.markdown("#### 检索资料")
     category = st.selectbox(
         "资料类别",
         list(CATEGORY_LABELS),
@@ -1123,6 +1230,14 @@ with tab_export:
 
         project_name = analysis.project_info.project_name or project["name"]
         output_name = safe_filename(f"{project_name}_投标文件初稿.docx")
+        template = store.word_template_path(current_id)
+        qualification_images = store.list_qualification_images(current_id)
+        use_template = bool(template) and st.checkbox(
+            f"使用项目模板：{template.name}",
+            value=True,
+            key=f"use_word_template_{current_id}",
+        )
+        st.caption(f"本次将自动编排 {len(qualification_images)} 张资质图片。")
         version_note = st.text_input(
             "版本说明",
             placeholder="例如：第一次内部评审",
@@ -1138,7 +1253,14 @@ with tab_export:
             with st.spinner("正在生成 Word..."):
                 store.save_json(current_id, "review", review.model_dump())
                 target = store.next_output_version(current_id, output_name)
-                export_docx(target["path"], analysis, drafts, review)
+                export_docx(
+                    target["path"],
+                    analysis,
+                    drafts,
+                    review,
+                    template_path=template if use_template else None,
+                    qualification_images=qualification_images,
+                )
                 store.record_export_version(
                     current_id,
                     target["path"],
@@ -1152,6 +1274,8 @@ with tab_export:
                     },
                     warning_count=readiness["warning_count"],
                     note=version_note,
+                    template_filename=template.name if use_template and template else "",
+                    qualification_image_count=len(qualification_images),
                 )
                 store.update_project(current_id, status="exported")
             st.session_state["project_flash"] = f"Word V{target['version']:03d} 已生成"
@@ -1171,6 +1295,8 @@ with tab_export:
                         "pending": summary.get("pending", 0),
                         "high": summary.get("high", 0),
                         "note": item["note"] or "-",
+                        "template": item.get("template_filename") or "系统默认",
+                        "qualification_images": item.get("qualification_image_count", 0),
                     }
                 )
             st.dataframe(
@@ -1184,6 +1310,8 @@ with tab_export:
                     "pending": st.column_config.NumberColumn("待处理", width="small"),
                     "high": st.column_config.NumberColumn("高风险", width="small"),
                     "note": st.column_config.TextColumn("版本说明", width="large"),
+                    "template": st.column_config.TextColumn("模板", width="medium"),
+                    "qualification_images": st.column_config.NumberColumn("资质图", width="small"),
                 },
             )
 
@@ -1203,6 +1331,7 @@ with tab_export:
                 str(selected_version["path"]),
                 selected_version["sha256"],
                 selected_version["chapter_count"],
+                bool(selected_version.get("template_filename")),
                 word_size,
                 word_modified_ns,
             )
@@ -1492,6 +1621,7 @@ with tab_submission:
             str(selected_word_version["path"]),
             selected_word_version["sha256"],
             selected_word_version["chapter_count"],
+            bool(selected_word_version.get("template_filename")),
             selected_word_size,
             selected_word_modified_ns,
         )

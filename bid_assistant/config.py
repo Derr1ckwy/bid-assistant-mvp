@@ -30,6 +30,14 @@ class Settings:
     llm_max_chunks: int = int(os.getenv("LLM_MAX_CHUNKS", "12"))
     ragflow_base_url: str = os.getenv("RAGFLOW_BASE_URL", "http://localhost:9380").rstrip("/")
     ragflow_api_key: str = os.getenv("RAGFLOW_API_KEY", "")
+    mineru_cli: str = os.getenv("MINERU_CLI", "mineru")
+    mineru_backend: str = os.getenv("MINERU_BACKEND", "pipeline")
+    mineru_timeout_seconds: int = int(os.getenv("MINERU_TIMEOUT_SECONDS", "1800"))
+    embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "").rstrip("/")
+    embedding_api_key: str = os.getenv("EMBEDDING_API_KEY", "")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
+    embedding_timeout_seconds: int = int(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "120"))
+    vector_min_files: int = int(os.getenv("VECTOR_MIN_FILES", "40"))
 
 
 def save_llm_settings(value: Settings) -> Path:

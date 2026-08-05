@@ -11,6 +11,7 @@ from bid_assistant.parsers import (
     parse_document,
     parse_document_bytes,
 )
+from bid_assistant.models import ParsedDocument, ParsedPage
 
 
 def test_parse_utf8_text(tmp_path: Path) -> None:
@@ -124,3 +125,45 @@ def test_parse_document_bytes_validates_uploaded_json() -> None:
     )
 
     assert "company.name: 武汉灵坤" in parsed.full_text
+
+
+def test_auto_parser_uses_mineru_for_scanned_pdf(tmp_path: Path) -> None:
+    source = tmp_path / "scan.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with source.open("wb") as target:
+        writer.write(target)
+
+    class FakeMinerU:
+        def parse(self, path):
+            text = "OCR 提取的招标内容" * 20
+            return ParsedDocument(
+                filename=Path(path).name,
+                file_type="pdf",
+                pages=[ParsedPage(page_number=1, text=text)],
+                full_text=text,
+                char_count=len(text),
+                parser_engine="mineru",
+            )
+
+    parsed = parse_document(source, mode="auto", mineru_client=FakeMinerU())
+
+    assert parsed.parser_engine == "mineru"
+    assert "OCR 提取" in parsed.full_text
+
+
+def test_mineru_failure_falls_back_to_native_parser(tmp_path: Path) -> None:
+    source = tmp_path / "scan.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with source.open("wb") as target:
+        writer.write(target)
+
+    class BrokenMinerU:
+        def parse(self, path):
+            raise RuntimeError("not installed")
+
+    parsed = parse_document(source, mode="mineru", mineru_client=BrokenMinerU())
+
+    assert parsed.parser_engine == "native"
+    assert any("已保留原生结果" in warning for warning in parsed.warnings)

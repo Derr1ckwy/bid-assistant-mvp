@@ -63,3 +63,30 @@ def test_search_knowledge_indexes_csv_and_json(tmp_path: Path) -> None:
 
     assert certificate_results[0].source_file == "company.csv"
     assert feature_results[0].source_file == "product.json"
+
+
+def test_hybrid_vector_search_activates_at_threshold_and_caches_embeddings(tmp_path: Path) -> None:
+    clear_knowledge_cache()
+    first = tmp_path / "企业.txt"
+    second = tmp_path / "历史.txt"
+    first.write_text("普通企业介绍", encoding="utf-8")
+    second.write_text("独特的灾备演练与恢复方案", encoding="utf-8")
+
+    class FakeEmbeddingClient:
+        configured = True
+        cache_key = "fake-model"
+
+        def __init__(self):
+            self.calls = []
+
+        def embed(self, texts):
+            self.calls.append(list(texts))
+            return [[1.0, 0.0] if "恢复" in text or "灾备" in text else [0.0, 1.0] for text in texts]
+
+    client = FakeEmbeddingClient()
+    files = {"company": [first], "product": [], "history": [second]}
+    first_results = search_knowledge("灾备恢复", files, embedding_client=client, vector_min_files=2)
+    search_knowledge("灾备恢复", files, embedding_client=client, vector_min_files=2)
+
+    assert first_results[0].source_file == "历史.txt"
+    assert len(client.calls) == 4

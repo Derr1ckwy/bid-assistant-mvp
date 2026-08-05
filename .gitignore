@@ -1,5 +1,6 @@
 .env
 .venv/
+.mineru-venv/
 __pycache__/
 .pytest_cache/
 *.pyc

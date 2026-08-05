@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from PIL import Image, UnidentifiedImageError
+
 
 ARCHIVE_FORMAT = "bid-assistant-project"
 ARCHIVE_VERSION = 1
@@ -24,6 +26,7 @@ MAX_EXPORT_VERSIONS = 50
 MAX_PACKAGE_VERSIONS = 20
 KNOWLEDGE_CATEGORIES = {"company", "product", "history"}
 ATTACHMENT_CATEGORIES = {"qualification", "business", "technical", "pricing", "signature", "other"}
+QUALIFICATION_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 _COPY_CHUNK_SIZE = 1024 * 1024
 _PROJECT_ID_PATTERN = re.compile(r"[a-zA-Z0-9_-]+")
 _DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
@@ -377,6 +380,86 @@ class ProjectStore:
             pass
         return True
 
+    def save_word_template(self, project_id: str, filename: str, content: bytes) -> Path:
+        sanitized = safe_filename(filename)
+        if Path(sanitized).suffix.lower() != ".docx":
+            raise ValueError("Word 模板仅支持 DOCX 文件")
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                if "word/document.xml" not in archive.namelist():
+                    raise ValueError("上传的文件不是有效的 DOCX 模板")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("上传的文件不是有效的 DOCX 模板") from exc
+        template_dir = self.project_dir(project_id) / "template"
+        template_dir.mkdir(exist_ok=True)
+        for existing in template_dir.iterdir():
+            if existing.is_file():
+                existing.unlink()
+        target = template_dir / sanitized
+        target.write_bytes(content)
+        return target
+
+    def word_template_path(self, project_id: str) -> Path | None:
+        template_dir = self.project_dir(project_id) / "template"
+        if not template_dir.exists():
+            return None
+        templates = sorted(path for path in template_dir.iterdir() if path.is_file() and path.suffix.lower() == ".docx")
+        return templates[0] if templates else None
+
+    def delete_word_template(self, project_id: str) -> bool:
+        path = self.word_template_path(project_id)
+        if path is None:
+            return False
+        path.unlink()
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        return True
+
+    def save_qualification_image(self, project_id: str, filename: str, content: bytes) -> Path:
+        sanitized = safe_filename(filename)
+        suffix = Path(sanitized).suffix.lower()
+        if suffix not in QUALIFICATION_IMAGE_EXTENSIONS:
+            raise ValueError("资质图片仅支持 PNG、JPG、JPEG")
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                image.verify()
+        except (UnidentifiedImageError, OSError) as exc:
+            raise ValueError("上传的文件不是有效图片") from exc
+        target_dir = self.project_dir(project_id) / "qualification_images"
+        target_dir.mkdir(exist_ok=True)
+        target = target_dir / sanitized
+        stem = Path(sanitized).stem[:150] or "qualification"
+        counter = 2
+        while target.exists():
+            target = target_dir / safe_filename(f"{stem} ({counter}){suffix}")
+            counter += 1
+        target.write_bytes(content)
+        return target
+
+    def list_qualification_images(self, project_id: str) -> list[Path]:
+        target_dir = self.project_dir(project_id) / "qualification_images"
+        if not target_dir.exists():
+            return []
+        return sorted(
+            path for path in target_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in QUALIFICATION_IMAGE_EXTENSIONS
+        )
+
+    def qualification_image_path(self, project_id: str, filename: str) -> Path | None:
+        if filename != safe_filename(filename):
+            return None
+        path = self.project_dir(project_id) / "qualification_images" / filename
+        return path if path.is_file() and path.suffix.lower() in QUALIFICATION_IMAGE_EXTENSIONS else None
+
+    def delete_qualification_image(self, project_id: str, filename: str) -> bool:
+        path = self.qualification_image_path(project_id, filename)
+        if path is None:
+            return False
+        path.unlink()
+        return True
+
     def save_attachment_file(self, project_id: str, category: str, filename: str, content: bytes) -> Path:
         if category not in ATTACHMENT_CATEGORIES:
             raise ValueError("Invalid attachment category")
@@ -446,6 +529,8 @@ class ProjectStore:
         review_summary: dict[str, int],
         warning_count: int = 0,
         note: str = "",
+        template_filename: str = "",
+        qualification_image_count: int = 0,
     ) -> dict:
         if version < 1 or chapter_count < 1:
             raise ValueError("Invalid export version metadata")
@@ -469,6 +554,8 @@ class ProjectStore:
             },
             "warning_count": max(0, int(warning_count)),
             "note": note.strip()[:200],
+            "template_filename": safe_filename(template_filename) if template_filename else "",
+            "qualification_image_count": max(0, int(qualification_image_count)),
         }
         versions_dir = self.project_dir(project_id) / "versions" / "exports"
         versions_dir.mkdir(parents=True, exist_ok=True)
@@ -529,6 +616,8 @@ class ProjectStore:
                         "review_summary": review_summary,
                         "warning_count": int(payload.get("warning_count", 0)),
                         "note": str(payload.get("note", "")),
+                        "template_filename": str(payload.get("template_filename", "")),
+                        "qualification_image_count": int(payload.get("qualification_image_count", 0)),
                         "path": path,
                     }
                 )

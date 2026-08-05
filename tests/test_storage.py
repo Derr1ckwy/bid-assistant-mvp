@@ -5,6 +5,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from docx import Document
+from PIL import Image
 
 from bid_assistant.storage import (
     MAX_DRAFT_VERSIONS,
@@ -57,6 +59,36 @@ def test_knowledge_files_are_categorized_and_deletable(tmp_path: Path, category:
     assert store.delete_knowledge_file(project["id"], reference) is True
     assert store.delete_knowledge_file(project["id"], reference) is False
     assert store.list_knowledge_files(project["id"])[category] == []
+
+
+def test_word_template_and_qualification_images_are_managed_per_project(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("模板测试")
+    template_buffer = io.BytesIO()
+    template_document = Document()
+    template_document.add_paragraph("{{PROJECT_NAME}}")
+    template_document.add_paragraph("{{BID_CONTENT}}")
+    template_document.save(template_buffer)
+    template = store.save_word_template(project["id"], "甲方模板.docx", template_buffer.getvalue())
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (320, 180), "white").save(image_buffer, format="PNG")
+    image = store.save_qualification_image(project["id"], "营业执照.png", image_buffer.getvalue())
+
+    assert store.word_template_path(project["id"]) == template
+    assert store.list_qualification_images(project["id"]) == [image]
+    assert store.delete_qualification_image(project["id"], image.name) is True
+    assert store.delete_word_template(project["id"]) is True
+
+
+def test_invalid_template_and_image_are_rejected(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("非法文件测试")
+
+    with pytest.raises(ValueError):
+        store.save_word_template(project["id"], "模板.docx", b"not-docx")
+    with pytest.raises(ValueError):
+        store.save_qualification_image(project["id"], "证书.png", b"not-image")
 
 
 def test_safe_filename_removes_path_and_windows_characters() -> None:
@@ -117,6 +149,12 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     store.save_json(project_id, "drafts", [{"title": "第一版"}])
     store.save_json(project_id, "review", {"issues": []})
     store.save_knowledge_file(project_id, "company", "企业资料.txt", b"company")
+    template_buffer = io.BytesIO()
+    Document().save(template_buffer)
+    store.save_word_template(project_id, "公司模板.docx", template_buffer.getvalue())
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (100, 80), "white").save(image_buffer, format="PNG")
+    store.save_qualification_image(project_id, "营业执照.png", image_buffer.getvalue())
     store.save_attachment_file(project_id, "qualification", "营业执照.pdf", b"license")
     store.save_json(project_id, "submission_checklist", [{"name": "营业执照", "status": "已备妥"}])
     store.save_draft_version(project_id, [{"title": "第一版"}], "首次保存")
@@ -156,6 +194,8 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert store.load_json(duplicate["id"], "analysis_acceptance") == {"complete": True}
     assert store.load_json(duplicate["id"], "drafts") == [{"title": "第一版"}]
     assert store.list_knowledge_files(duplicate["id"])["company"][0].read_bytes() == b"company"
+    assert store.word_template_path(duplicate["id"]).name == "公司模板.docx"
+    assert store.list_qualification_images(duplicate["id"])[0].name == "营业执照.png"
     assert sum(len(paths) for paths in store.list_attachment_files(duplicate["id"]).values()) == 0
     assert store.load_json(duplicate["id"], "submission_checklist") is None
     assert not (store.project_dir(duplicate["id"]) / "output").exists()
@@ -287,6 +327,8 @@ def test_word_outputs_are_versioned_and_recorded(tmp_path: Path) -> None:
         review_summary={"pending": 3, "high": 1, "medium": 2, "low": 0},
         warning_count=2,
         note="第一次评审",
+        template_filename="甲方模板.docx",
+        qualification_image_count=3,
     )
     second = store.next_output_version(project["id"], "测试项目_投标文件初稿.docx")
     second["path"].write_bytes(b"second docx")
@@ -306,6 +348,8 @@ def test_word_outputs_are_versioned_and_recorded(tmp_path: Path) -> None:
     assert [item["version"] for item in versions] == [2, 1]
     assert versions[1]["note"] == "第一次评审"
     assert versions[1]["review_summary"]["high"] == 1
+    assert versions[1]["template_filename"] == "甲方模板.docx"
+    assert versions[1]["qualification_image_count"] == 3
 
 
 def test_word_output_retention_keeps_latest_versions(tmp_path: Path) -> None:
