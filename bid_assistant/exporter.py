@@ -31,6 +31,25 @@ PALE_GRAY = "FAFAFA"
 BORDER = "7F7F7F"
 
 
+def _set_rpr_font_identity(r_pr, *, latin: str, east_asia: str) -> None:
+    r_fonts = r_pr.find(qn("w:rFonts"))
+    if r_fonts is None:
+        r_fonts = OxmlElement("w:rFonts")
+        r_pr.insert(0, r_fonts)
+    for key in ("asciiTheme", "hAnsiTheme", "eastAsiaTheme", "cstheme"):
+        r_fonts.attrib.pop(qn(f"w:{key}"), None)
+    for key, value in (("ascii", latin), ("hAnsi", latin), ("cs", latin), ("eastAsia", east_asia)):
+        r_fonts.set(qn(f"w:{key}"), value)
+    r_fonts.set(qn("w:hint"), "eastAsia")
+
+    language = r_pr.find(qn("w:lang"))
+    if language is None:
+        language = OxmlElement("w:lang")
+        r_pr.append(language)
+    for key in ("val", "eastAsia", "bidi"):
+        language.set(qn(f"w:{key}"), "zh-CN")
+
+
 def _set_character_spacing(element, points: float) -> None:
     r_pr = element.get_or_add_rPr()
     for existing in r_pr.findall(qn("w:spacing")):
@@ -55,12 +74,7 @@ def _set_style_font(
     style.font.bold = bold
     style.font.color.rgb = RGBColor.from_string(color)
     r_pr = style._element.get_or_add_rPr()
-    r_fonts = r_pr.find(qn("w:rFonts"))
-    if r_fonts is None:
-        r_fonts = OxmlElement("w:rFonts")
-        r_pr.insert(0, r_fonts)
-    for key, value in (("ascii", latin), ("hAnsi", latin), ("cs", latin), ("eastAsia", east_asia)):
-        r_fonts.set(qn(f"w:{key}"), value)
+    _set_rpr_font_identity(r_pr, latin=latin, east_asia=east_asia)
     _set_character_spacing(style._element, character_spacing)
 
 
@@ -85,12 +99,7 @@ def _format_run(
     if color is not None:
         run.font.color.rgb = RGBColor.from_string(color)
     r_pr = run._element.get_or_add_rPr()
-    r_fonts = r_pr.find(qn("w:rFonts"))
-    if r_fonts is None:
-        r_fonts = OxmlElement("w:rFonts")
-        r_pr.insert(0, r_fonts)
-    for key, value in (("ascii", latin), ("hAnsi", latin), ("cs", latin), ("eastAsia", east_asia)):
-        r_fonts.set(qn(f"w:{key}"), value)
+    _set_rpr_font_identity(r_pr, latin=latin, east_asia=east_asia)
     _set_character_spacing(run._element, character_spacing)
 
 
@@ -129,6 +138,21 @@ def _configure_document(document: Document) -> None:
     section.right_margin = Cm(2.5)
     section.header_distance = Cm(1.25)
     section.footer_distance = Cm(1.25)
+
+    styles_root = document.styles.element
+    doc_defaults = styles_root.find(qn("w:docDefaults"))
+    if doc_defaults is None:
+        doc_defaults = OxmlElement("w:docDefaults")
+        styles_root.insert(0, doc_defaults)
+    r_pr_default = doc_defaults.find(qn("w:rPrDefault"))
+    if r_pr_default is None:
+        r_pr_default = OxmlElement("w:rPrDefault")
+        doc_defaults.insert(0, r_pr_default)
+    default_r_pr = r_pr_default.find(qn("w:rPr"))
+    if default_r_pr is None:
+        default_r_pr = OxmlElement("w:rPr")
+        r_pr_default.append(default_r_pr)
+    _set_rpr_font_identity(default_r_pr, latin=BODY_FONT, east_asia=BODY_FONT_EAST_ASIA)
 
     normal = document.styles["Normal"]
     _set_style_font(

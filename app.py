@@ -43,7 +43,7 @@ from bid_assistant.parsers import (
     parse_document_bytes,
 )
 from bid_assistant.reviewer import build_export_checklist, build_review_report
-from bid_assistant.storage import ProjectArchiveError, ProjectStore, safe_filename
+from bid_assistant.storage import ProjectArchiveError, ProjectStore, format_beijing_time, safe_filename
 from bid_assistant.submission import (
     ATTACHMENT_CATEGORY_LABELS,
     SUBMISSION_CATEGORIES,
@@ -1297,7 +1297,7 @@ with tab_export:
                 history_rows.append(
                     {
                         "version": f"V{item['version']:03d}",
-                        "created_at": item["created_at"].replace("T", " ").replace("+00:00", " UTC"),
+                        "created_at": format_beijing_time(item["created_at"]),
                         "chapters": item["chapter_count"],
                         "pending": summary.get("pending", 0),
                         "high": summary.get("high", 0),
@@ -1394,7 +1394,7 @@ with tab_export:
             st.caption(
                 f"实际 SHA-256：{word_quality['sha256']} · "
                 f"{word_quality['size'] / 1024 / 1024:.2f} MB · "
-                f"质检时间：{word_quality['verified_at'].replace('T', ' ').replace('+00:00', ' UTC')}"
+                f"质检时间：{format_beijing_time(word_quality['verified_at'])}"
             )
         else:
             st.caption("尚未生成 Word 版本。")

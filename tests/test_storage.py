@@ -14,6 +14,7 @@ from bid_assistant.storage import (
     MAX_PACKAGE_VERSIONS,
     ProjectArchiveError,
     ProjectStore,
+    format_beijing_time,
     safe_filename,
 )
 
@@ -345,11 +346,17 @@ def test_word_outputs_are_versioned_and_recorded(tmp_path: Path) -> None:
     assert first["filename"].endswith("_V001.docx")
     assert second["filename"].endswith("_V002.docx")
     assert first_record["sha256"]
+    assert first_record["created_at"].endswith("+08:00")
     assert [item["version"] for item in versions] == [2, 1]
     assert versions[1]["note"] == "第一次评审"
     assert versions[1]["review_summary"]["high"] == 1
     assert versions[1]["template_filename"] == "甲方模板.docx"
     assert versions[1]["qualification_image_count"] == 3
+
+
+def test_word_version_time_is_displayed_in_beijing_time() -> None:
+    assert format_beijing_time("2026-08-05T03:40:06.349+00:00") == "2026-08-05 11:40:06"
+    assert format_beijing_time("2026-08-05T11:40:06.349+08:00") == "2026-08-05 11:40:06"
 
 
 def test_word_output_retention_keeps_latest_versions(tmp_path: Path) -> None:

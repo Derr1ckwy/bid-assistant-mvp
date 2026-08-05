@@ -89,7 +89,16 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
     assert cover_title.runs[0]._element.find(qn("w:rPr")).find(qn("w:spacing")) is not None
     assert 'w:eastAsia="宋体"' in cover_title.runs[0]._element.xml
     for style_name in ("Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"):
-        assert 'w:eastAsia="宋体"' in reopened.styles[style_name]._element.xml
+        style_xml = reopened.styles[style_name]._element.xml
+        assert 'w:eastAsia="宋体"' in style_xml
+        assert 'w:eastAsia="zh-CN"' in style_xml
+        assert "eastAsiaTheme" not in style_xml
+
+    styles_xml = reopened.styles.element.xml
+    doc_defaults_xml = styles_xml[styles_xml.index("<w:docDefaults"):styles_xml.index("</w:docDefaults>")]
+    assert 'w:eastAsia="宋体"' in doc_defaults_xml
+    assert 'w:eastAsia="zh-CN"' in doc_defaults_xml
+    assert "eastAsiaTheme" not in doc_defaults_xml
 
     cover_metadata = reopened.tables[0]
     assert [cell.width for cell in cover_metadata.rows[0].cells] == [2750 * 635, 6151 * 635]
@@ -192,6 +201,8 @@ def test_export_cleans_model_markdown_and_uses_formal_monochrome_tables(tmp_path
                 for run in paragraph.runs:
                     assert run.font.size.pt == 12
                     assert 'w:eastAsia="宋体"' in run._element.xml
+                    assert 'w:eastAsia="zh-CN"' in run._element.xml
+                    assert "eastAsiaTheme" not in run._element.xml
 
 
 def test_internal_appendices_are_opt_in(tmp_path: Path) -> None:

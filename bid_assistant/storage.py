@@ -8,8 +8,9 @@ import shutil
 import sqlite3
 import stat
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Lock
 from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
@@ -33,6 +34,9 @@ _DRAFT_VERSION_PATTERN = re.compile(r"draftv_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _EXPORT_VERSION_PATTERN = re.compile(r"exportv_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _PACKAGE_VERSION_PATTERN = re.compile(r"packagev_\d{8}T\d{12}Z_[0-9a-f]{8}")
 _WINDOWS_RESERVED_NAME = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)", re.IGNORECASE)
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
+_VERSION_STAMP_LOCK = Lock()
+_LAST_VERSION_TIME: datetime | None = None
 
 
 class ProjectArchiveError(ValueError):
@@ -44,7 +48,29 @@ def _now() -> str:
 
 
 def _version_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    global _LAST_VERSION_TIME
+    with _VERSION_STAMP_LOCK:
+        current = datetime.now(timezone.utc)
+        if _LAST_VERSION_TIME is not None and current <= _LAST_VERSION_TIME:
+            current = _LAST_VERSION_TIME + timedelta(microseconds=1)
+        _LAST_VERSION_TIME = current
+    return current.strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def _beijing_now() -> str:
+    return datetime.now(BEIJING_TIMEZONE).isoformat(timespec="milliseconds")
+
+
+def format_beijing_time(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(BEIJING_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _sha256(path: Path) -> str:
@@ -543,7 +569,7 @@ class ProjectStore:
         payload = {
             "id": version_id,
             "version": version,
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "created_at": _beijing_now(),
             "filename": target.name,
             "size": target.stat().st_size,
             "sha256": _sha256(target),

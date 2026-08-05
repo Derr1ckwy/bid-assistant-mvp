@@ -198,7 +198,12 @@ def verify_docx_output(
         except KeyError:
             heading_fonts_ok = False
             continue
-        if 'w:eastAsia="宋体"' not in style._element.xml:
+        style_xml = style._element.xml
+        if (
+            'w:eastAsia="宋体"' not in style_xml
+            or "eastAsiaTheme" in style_xml
+            or 'w:eastAsia="zh-CN"' not in style_xml
+        ):
             heading_fonts_ok = False
     if not heading_fonts_ok:
         warnings.append("标题样式未全部使用宋体。")
@@ -206,7 +211,7 @@ def verify_docx_output(
         {
             "label": "标题字体",
             "status": "pass" if heading_fonts_ok else "warning",
-            "detail": "封面及各级标题统一使用宋体。",
+            "detail": "封面及各级标题固定使用宋体、中文东亚语言且不继承主题字体。",
         }
     )
 
