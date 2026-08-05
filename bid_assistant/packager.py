@@ -47,7 +47,11 @@ def build_package_readiness(
             "key": "checklist",
             "label": "材料清单",
             "status": "pass" if items else "block",
-            "detail": f"清单共 {len(items)} 项。" if items else "尚未生成最终提交材料清单。",
+            "detail": (
+                f"清单共 {len(items)} 项。"
+                if items
+                else "系统内最终提交材料清单为空；请从分析结果生成或手工新增并保存，无需上传清单文件。"
+            ),
         },
         {
             "key": "saved",

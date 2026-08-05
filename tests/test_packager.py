@@ -78,6 +78,11 @@ def test_package_readiness_blocks_incomplete_or_unsaved_materials(tmp_path: Path
         item["key"] for item in empty_readiness["checks"] if item["status"] == "block"
     }
     assert empty_blocked_keys == {"word", "checklist"}
+    checklist_check = next(
+        item for item in empty_readiness["checks"] if item["key"] == "checklist"
+    )
+    assert "无需上传清单文件" in checklist_check["detail"]
+    assert "手工新增并保存" in checklist_check["detail"]
 
 
 def test_package_readiness_allows_internal_review_after_warning_confirmation(tmp_path: Path) -> None:

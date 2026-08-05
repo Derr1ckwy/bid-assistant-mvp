@@ -1432,14 +1432,20 @@ with tab_submission:
         disabled=analysis is None,
         key=f"sync_submission_{current_id}",
         icon=":material/sync:",
+        help="材料清单无需上传文件；系统会从分析结果同步，也可以在下方表格手工新增。",
     ):
         synced = sync_submission_items(analysis, submission_items)
         store.save_json(current_id, "submission_checklist", [item.model_dump() for item in synced])
         st.session_state.pop(f"submission_editor_{current_id}", None)
-        st.session_state["project_flash"] = f"提交清单已同步，共 {len(synced)} 项"
+        if synced:
+            st.session_state["project_flash"] = f"提交清单已同步，共 {len(synced)} 项"
+        else:
+            st.session_state["project_flash"] = (
+                "分析结果未识别到所需材料，清单仍为空；请在提交清单表格中手工新增并保存。"
+            )
         st.rerun()
 
-    st.markdown("#### 提交附件")
+    st.markdown("#### 提交附件（真实文件）")
     upload_columns = st.columns([1, 3])
     attachment_category = upload_columns[0].selectbox(
         "附件类别",
@@ -1496,7 +1502,7 @@ with tab_submission:
                     st.session_state["project_flash"] = f"已移除附件：{path.name}"
                     st.rerun()
 
-    st.markdown("#### 最终提交材料清单")
+    st.markdown("#### 最终提交材料清单（系统内填写，无需上传清单文件）")
     attachment_files = store.list_attachment_files(current_id)
     current_attachment_refs = {
         f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
@@ -1517,6 +1523,8 @@ with tab_submission:
         "note",
     ]
     submission_frame = pd.DataFrame(_submission_rows(submission_items), columns=submission_columns)
+    if not submission_items:
+        st.info("当前清单为空。请先从分析结果生成；若未识别到材料，请在下表新增行并保存。")
     edited_submission = st.data_editor(
         submission_frame,
         key=f"submission_editor_{current_id}",
