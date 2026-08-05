@@ -52,7 +52,7 @@ def _create_minimal_package(
     return target
 
 
-def test_package_readiness_blocks_incomplete_or_unsaved_materials(tmp_path: Path) -> None:
+def test_package_readiness_allows_word_only_and_automatic_attachment_inventory(tmp_path: Path) -> None:
     word_path = tmp_path / "投标文件_V002.docx"
     word_path.write_bytes(b"docx")
     review = ReviewReport()
@@ -64,25 +64,27 @@ def test_package_readiness_blocks_incomplete_or_unsaved_materials(tmp_path: Path
     readiness = build_package_readiness(
         _word_version(word_path),
         items,
-        set(),
+        {"报价文件/报价表.xlsx"},
         review,
-        has_unsaved_changes=True,
     )
 
     blocked_keys = {item["key"] for item in readiness["checks"] if item["status"] == "block"}
-    assert readiness["can_package"] is False
-    assert blocked_keys == {"saved", "required", "links"}
+    assert readiness["can_package"] is True
+    assert blocked_keys == set()
+    assert {item["key"] for item in readiness["checks"]} == {"word", "files", "review"}
 
     empty_readiness = build_package_readiness(None, [], set(), review)
     empty_blocked_keys = {
         item["key"] for item in empty_readiness["checks"] if item["status"] == "block"
     }
-    assert empty_blocked_keys == {"word", "checklist"}
-    checklist_check = next(
-        item for item in empty_readiness["checks"] if item["key"] == "checklist"
+    assert empty_blocked_keys == {"word"}
+
+    word_only_readiness = build_package_readiness(_word_version(word_path), [], set(), review)
+    assert word_only_readiness["can_package"] is True
+    files_check = next(
+        item for item in word_only_readiness["checks"] if item["key"] == "files"
     )
-    assert "无需上传清单文件" in checklist_check["detail"]
-    assert "手工新增并保存" in checklist_check["detail"]
+    assert "0 个补充附件" in files_check["detail"]
 
 
 def test_package_readiness_allows_internal_review_after_warning_confirmation(tmp_path: Path) -> None:
@@ -226,6 +228,28 @@ def test_submission_package_contains_manifest_checksums_and_chinese_checklist(tm
     assert "校验结论：通过" in report_text
     assert "提交包版本：P001" in report_text
     assert "[通过] 投标文件/项目投标文件_V003.docx" in report_text
+
+
+def test_word_only_package_is_valid_and_uses_an_automatic_empty_directory(tmp_path: Path) -> None:
+    word_path = tmp_path / "投标文件_V001.docx"
+    word_path.write_bytes(b"word-content")
+    target = tmp_path / "交付包_P001.zip"
+
+    manifest = create_submission_package(
+        target,
+        project={"id": "proj_test", "name": "测试项目"},
+        word_version=_word_version(word_path),
+        items=[],
+        attachment_files={},
+        review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
+        internal_review_only=False,
+    )
+    verification = verify_submission_package(target)
+
+    assert manifest["checklist"]["complete"] is True
+    assert manifest["checklist"]["total"] == 0
+    assert verification["valid"] is True
+    assert verification["warnings"] == []
 
 
 def test_package_verifier_detects_outer_and_inner_tampering(tmp_path: Path) -> None:

@@ -28,7 +28,6 @@ def build_package_readiness(
     attachment_refs: set[str],
     review: ReviewReport | None,
     *,
-    has_unsaved_changes: bool = False,
     word_quality: dict | None = None,
 ) -> dict:
     summary = summarize_submission_items(items, attachment_refs)
@@ -44,39 +43,13 @@ def build_package_readiness(
             ),
         },
         {
-            "key": "checklist",
-            "label": "材料清单",
-            "status": "pass" if items else "block",
-            "detail": (
-                f"清单共 {len(items)} 项。"
-                if items
-                else "系统内最终提交材料清单为空；请从分析结果生成或手工新增并保存，无需上传清单文件。"
-            ),
-        },
-        {
-            "key": "saved",
-            "label": "清单保存状态",
-            "status": "block" if has_unsaved_changes else "pass",
-            "detail": "存在未保存修改，请先保存清单。" if has_unsaved_changes else "当前清单已保存。",
-        },
-        {
-            "key": "required",
-            "label": "必交项",
-            "status": "block" if summary["pending_required"] else "pass",
-            "detail": (
-                f"仍有 {summary['pending_required']} 个必交项待准备。"
-                if summary["pending_required"]
-                else "所有必交项均已备妥或明确不适用。"
-            ),
-        },
-        {
-            "key": "links",
-            "label": "附件关联",
+            "key": "files",
+            "label": "包内文件",
             "status": "block" if summary["broken_links"] else "pass",
             "detail": (
-                f"有 {summary['broken_links']} 个关联附件不存在。"
+                f"有 {summary['broken_links']} 个附件无法读取，请重新上传。"
                 if summary["broken_links"]
-                else f"已关联 {summary['linked']} 个附件，未发现断链。"
+                else f"将包含 1 个 Word 和 {len(items)} 个补充附件，文件目录由系统自动生成。"
             ),
         },
     ]

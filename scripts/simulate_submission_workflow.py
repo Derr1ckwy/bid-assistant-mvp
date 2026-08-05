@@ -10,14 +10,18 @@ from docx.shared import Pt
 
 from bid_assistant.docx_quality import verify_docx_output
 from bid_assistant.exporter import export_docx
-from bid_assistant.models import ChapterDraft, ReviewReport, SubmissionItem, TenderAnalysis
+from bid_assistant.models import ChapterDraft, ReviewReport, TenderAnalysis
 from bid_assistant.packager import (
     build_package_readiness,
     create_submission_package,
     verify_submission_package,
 )
 from bid_assistant.storage import ProjectStore
-from bid_assistant.submission import ATTACHMENT_CATEGORY_LABELS, summarize_submission_items
+from bid_assistant.submission import (
+    ATTACHMENT_CATEGORY_LABELS,
+    build_attachment_inventory,
+    summarize_submission_items,
+)
 
 
 NOTICE = "模拟测试资料，不可用于真实投标。"
@@ -86,7 +90,7 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
         chapter_count=len(drafts),
         review_summary=review_summary,
         warning_count=1 if review.pending_count() else 0,
-        note="提交清单流程模拟测试；仅供内部预审",
+        note="交付打包流程模拟测试；仅供内部预审",
         qualification_image_count=len(store.list_qualification_images(project_id)),
     )
     word_quality = verify_docx_output(
@@ -95,7 +99,7 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
         expected_chapter_count=len(drafts),
         template_mode=False,
     )
-    empty_readiness = build_package_readiness(
+    word_only_readiness = build_package_readiness(
         word_version,
         [],
         set(),
@@ -126,7 +130,7 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
             "technical",
             "模拟测试_不可用于真实投标_技术响应说明.docx",
             "技术响应文件",
-            ["技术响应正文由系统生成 Word 承载，本附件仅用于演示附件关联。"],
+            ["技术响应正文由系统生成 Word 承载，本附件仅用于演示补充附件。"],
         ),
         (
             "signature",
@@ -135,17 +139,15 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
             ["真实提交前必须人工核对签字、盖章、骑缝章、密封和装订要求。"],
         ),
     ]
-    saved_paths = {}
     for category, filename, title, lines in attachment_specs:
-        path = store.save_attachment_file(
+        store.save_attachment_file(
             project_id,
             category,
             filename,
             _make_docx_bytes(title, lines),
         )
-        saved_paths[title] = (category, path)
 
-    pricing_path = store.save_attachment_file(
+    store.save_attachment_file(
         project_id,
         "pricing",
         "模拟测试_不可用于真实投标_报价响应表.csv",
@@ -154,87 +156,48 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
             "模拟测试项,项,1,,,不可用于真实投标\r\n"
         ).encode("utf-8"),
     )
-    saved_paths["报价响应表"] = ("pricing", pricing_path)
-
-    pending_items = []
-    material_names = [
-        "营业执照复印件",
-        "建筑业企业资质证明",
-        "法定代表人授权委托书",
-        "技术响应文件",
-        "报价响应表",
-        "签字盖章及装订检查",
-    ]
-    for material_name in material_names:
-        category_id, path = saved_paths[material_name]
-        pending_items.append(
-            SubmissionItem(
-                category=ATTACHMENT_CATEGORY_LABELS[category_id],
-                name=material_name,
-                required=True,
-                status="待准备",
-                attachment=f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}",
-                note=NOTICE,
-            )
-        )
-
     attachment_files = store.list_attachment_files(project_id)
     attachment_refs = {
         f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
         for category_id, paths in attachment_files.items()
         for path in paths
     }
-    pending_readiness = build_package_readiness(
+    inventory_items = build_attachment_inventory(attachment_files)
+    inventory_summary = summarize_submission_items(inventory_items, attachment_refs)
+    attachment_readiness = build_package_readiness(
         word_version,
-        pending_items,
+        inventory_items,
         attachment_refs,
         review,
         word_quality=word_quality,
     )
-
-    ready_items = [
-        item.model_copy(update={"status": "已备妥"}) for item in pending_items
-    ]
-    store.save_json(
-        project_id,
-        "submission_checklist",
-        [item.model_dump() for item in ready_items],
-    )
-    ready_summary = summarize_submission_items(ready_items, attachment_refs)
-    ready_readiness = build_package_readiness(
-        word_version,
-        ready_items,
-        attachment_refs,
-        review,
-        word_quality=word_quality,
-    )
-    if not ready_readiness["can_package"]:
-        raise RuntimeError(f"模拟清单仍不可打包：{ready_readiness}")
+    if not attachment_readiness["can_package"]:
+        raise RuntimeError(f"模拟交付包仍不可生成：{attachment_readiness}")
 
     package_target = store.next_package_version(
         project_id,
-        f"{project_name}_最终提交包.zip",
+        f"{project_name}_交付包.zip",
     )
     create_submission_package(
         package_target["path"],
         project=project,
         word_version=word_version,
-        items=ready_items,
+        items=inventory_items,
         attachment_files=attachment_files,
         review_summary=review_summary,
         internal_review_only=True,
-        note="模拟测试资料，不可用于真实投标；仅验证提交清单与打包流程",
+        note="模拟测试资料，不可用于真实投标；仅验证交付打包流程",
     )
     package_version = store.record_package_version(
         project_id,
         package_target["path"],
         version=package_target["version"],
         word_version=word_version,
-        checklist_summary=ready_summary,
+        checklist_summary=inventory_summary,
         attachment_count=sum(len(paths) for paths in attachment_files.values()),
-        warning_count=ready_readiness["warning_count"],
+        warning_count=attachment_readiness["warning_count"],
         internal_review_only=True,
-        note="模拟测试资料，不可用于真实投标；仅验证提交清单与打包流程",
+        note="模拟测试资料，不可用于真实投标；仅验证交付打包流程",
     )
     verification = verify_submission_package(
         package_version["path"],
@@ -258,29 +221,17 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
             "quality_warnings": word_quality["warnings"],
         },
         "stages": {
-            "empty_checklist": {
-                "can_package": empty_readiness["can_package"],
-                "blocking_keys": [
-                    item["key"]
-                    for item in empty_readiness["checks"]
-                    if item["status"] == "block"
-                ],
+            "word_only": {
+                "can_package": word_only_readiness["can_package"],
+                "requires_confirmation": word_only_readiness["requires_confirmation"],
             },
-            "pending_items": {
-                "can_package": pending_readiness["can_package"],
-                "blocking_keys": [
-                    item["key"]
-                    for item in pending_readiness["checks"]
-                    if item["status"] == "block"
-                ],
-            },
-            "ready_items": {
-                "can_package": ready_readiness["can_package"],
-                "requires_confirmation": ready_readiness["requires_confirmation"],
-                "warning_count": ready_readiness["warning_count"],
+            "with_attachments": {
+                "can_package": attachment_readiness["can_package"],
+                "requires_confirmation": attachment_readiness["requires_confirmation"],
+                "warning_count": attachment_readiness["warning_count"],
             },
         },
-        "checklist": ready_summary,
+        "file_inventory": inventory_summary,
         "review": review_summary,
         "package": {
             "filename": package_version["filename"],
@@ -293,7 +244,7 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
     }
     store.save_json(project_id, "submission_simulation_report", report)
 
-    walkthrough = f"""# 提交清单模拟测试说明
+    walkthrough = f"""# 交付打包模拟测试说明
 
 > {NOTICE}
 
@@ -303,28 +254,26 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
 - 项目 ID：`{project_id}`
 - 继承 RAG 知识文件：{report['rag_file_count']} 份
 - Word：V{word_version['version']:03d}，成品质检 {'通过' if word_quality['valid'] else '未通过'}
-- 系统内材料清单：{ready_summary['total']} 项，必交项 {ready_summary['required']} 项，已备妥 {ready_summary['ready']} 项
-- 模拟提交附件：{sum(len(paths) for paths in attachment_files.values())} 个
-- 提交包：P{package_version['version']:03d}，完整性校验 {'通过' if verification['valid'] else '未通过'}
+- 模拟补充附件：{sum(len(paths) for paths in attachment_files.values())} 个
+- 系统自动文件目录：{inventory_summary['total']} 项
+- 交付包：P{package_version['version']:03d}，完整性校验 {'通过' if verification['valid'] else '未通过'}
 - 用途：仅内部预审，不可用于真实投标
 
 ## 你在页面中的正确操作顺序
 
-1. 打开“7. 提交清单”。
-2. 点击“从分析结果生成清单”。如果提示 0 项，说明分析没有提取到必交材料，不代表要上传一份清单文件。
-3. 在“最终提交材料清单”表格中新增行，填写材料名称、类别、是否必交和状态，然后保存清单。
-4. 在“提交附件（真实文件）”上传营业执照、资质证书、授权书、报价表等真实文件。
-5. 回到清单表格，把每一行关联到对应附件；准备完成后把状态改为“已备妥”。
-6. 生成或选择一个 Word 版本。
-7. 处理所有“不可打包”项。若只剩复核风险提示，勾选“仅用于内部预审”的确认框，再生成提交包。
+1. 打开“7. 交付打包”。
+2. 如有需要，上传营业执照、资质证书、授权书、报价表等补充附件；没有附件时可以跳过。
+3. 选择一个 Word 版本。
+4. 确认本次包内容；系统会自动生成文件目录，无需维护材料清单。
+5. 若存在复核风险，确认本包仅用于内部预审，然后生成交付包。
 
 ## 三类资料不要混淆
 
-- RAG 知识资料：用于生成正文和检索事实，不会自动进入提交包。
-- 系统内材料清单：描述最终要交什么，不需要上传清单文件。
-- 提交附件：真正随投标文件提交的营业执照、授权书、报价表、证书等文件。
+- RAG 知识资料：用于生成正文和检索事实，不会自动进入交付包。
+- 补充附件：需要与 Word 一起交付的营业执照、授权书、报价表、证书等文件。
+- 自动文件目录：系统在打包时生成，用户不需要编辑或上传。
 """
-    (store.project_dir(project_id) / "提交清单模拟测试说明.md").write_text(
+    (store.project_dir(project_id) / "交付打包模拟测试说明.md").write_text(
         walkthrough,
         encoding="utf-8",
     )
@@ -332,11 +281,11 @@ def run_simulation(source_project_id: str, requested_name: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="创建隔离的提交清单与打包流程模拟项目")
+    parser = argparse.ArgumentParser(description="创建隔离的交付打包流程模拟项目")
     parser.add_argument("source_project_id", help="作为业务数据来源的项目 ID")
     parser.add_argument(
         "--name",
-        default="提交清单模拟测试",
+        default="交付打包模拟测试",
         help="模拟项目名称；重名时自动追加序号",
     )
     args = parser.parse_args()

@@ -1,5 +1,11 @@
+from pathlib import Path
+
 from bid_assistant.models import ProjectInfo, RequirementItem, SubmissionItem, TenderAnalysis
-from bid_assistant.submission import summarize_submission_items, sync_submission_items
+from bid_assistant.submission import (
+    build_attachment_inventory,
+    summarize_submission_items,
+    sync_submission_items,
+)
 
 
 def test_sync_submission_items_preserves_manual_work_and_adds_new_requirements() -> None:
@@ -52,3 +58,25 @@ def test_submission_summary_tracks_required_items_and_broken_links() -> None:
     assert summary["linked"] == 2
     assert summary["broken_links"] == 1
     assert summary["complete"] is False
+
+    empty_summary = summarize_submission_items([], set())
+    assert empty_summary["complete"] is True
+
+
+def test_attachment_inventory_is_generated_from_real_files(tmp_path: Path) -> None:
+    license_path = tmp_path / "营业执照.pdf"
+    quote_path = tmp_path / "报价表.xlsx"
+    license_path.write_bytes(b"license")
+    quote_path.write_bytes(b"quote")
+
+    items = build_attachment_inventory(
+        {
+            "qualification": [license_path],
+            "pricing": [quote_path],
+        }
+    )
+
+    assert [item.name for item in items] == ["营业执照.pdf", "报价表.xlsx"]
+    assert all(item.status == "已备妥" for item in items)
+    assert items[0].attachment == "资格文件/营业执照.pdf"
+    assert items[1].attachment == "报价文件/报价表.xlsx"

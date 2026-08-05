@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from bid_assistant.models import SubmissionItem, TenderAnalysis
 
 
@@ -80,5 +82,25 @@ def summarize_submission_items(items: list[SubmissionItem], attachment_refs: set
         "pending_required": pending_required,
         "linked": linked,
         "broken_links": broken_links,
-        "complete": bool(items) and pending_required == 0,
+        "complete": pending_required == 0 and broken_links == 0,
     }
+
+
+def build_attachment_inventory(
+    attachment_files: dict[str, list[Path]],
+) -> list[SubmissionItem]:
+    items: list[SubmissionItem] = []
+    for category_id, paths in attachment_files.items():
+        category_label = ATTACHMENT_CATEGORY_LABELS[category_id]
+        for path in paths:
+            items.append(
+                SubmissionItem(
+                    category=category_label,
+                    name=path.name,
+                    required=True,
+                    status="已备妥",
+                    attachment=f"{category_label}/{path.name}",
+                    note="系统根据已上传附件自动生成",
+                )
+            )
+    return items

@@ -802,16 +802,6 @@ class ProjectStore:
         project_path = self.project_dir(project_id)
         source_ready = self.source_path(project_id) is not None
         drafts = self.load_json(project_id, "drafts", [])
-        checklist_payload = self.load_json(project_id, "submission_checklist", [])
-        checklist_items = [
-            item
-            for item in checklist_payload
-            if isinstance(item, dict) and str(item.get("name", "")).strip()
-        ]
-        checklist_complete = bool(checklist_items) and all(
-            not bool(item.get("required", True)) or item.get("status") in {"已备妥", "不适用"}
-            for item in checklist_items
-        )
         output_dir = project_path / "output"
         steps = [
             {"key": "source", "label": "招标文件", "complete": source_ready},
@@ -825,8 +815,7 @@ class ProjectStore:
                 "complete": output_dir.is_dir()
                 and any(path.is_file() and path.suffix.lower() == ".docx" for path in output_dir.iterdir()),
             },
-            {"key": "submission", "label": "提交清单", "complete": checklist_complete},
-            {"key": "package", "label": "提交打包", "complete": bool(self.list_package_versions(project_id))},
+            {"key": "package", "label": "交付打包", "complete": bool(self.list_package_versions(project_id))},
         ]
         completed = sum(bool(step["complete"]) for step in steps)
         knowledge_count = sum(len(paths) for paths in self.list_knowledge_files(project_id).values())

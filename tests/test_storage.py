@@ -264,7 +264,7 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     progress = store.project_progress(project_id)
 
     assert progress["completed"] == 4
-    assert progress["percent"] == 50
+    assert progress["percent"] == 57
     assert progress["knowledge_files"] == 1
     assert progress["attachment_files"] == 1
 
@@ -275,8 +275,8 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     )
 
     completed_progress = store.project_progress(project_id)
-    assert completed_progress["completed"] == 5
-    assert completed_progress["steps"][-2]["complete"] is True
+    assert completed_progress["completed"] == 4
+    assert all(step["key"] != "submission" for step in completed_progress["steps"])
 
     package = store.package_path(project_id, "提交包_P001.zip")
     package.write_bytes(b"package")
@@ -290,10 +290,10 @@ def test_project_progress_uses_persisted_artifacts(tmp_path: Path) -> None:
     )
 
     packaged_progress = store.project_progress(project_id)
-    assert packaged_progress["completed"] == 6
+    assert packaged_progress["completed"] == 5
     assert packaged_progress["steps"][-1] == {
         "key": "package",
-        "label": "提交打包",
+        "label": "交付打包",
         "complete": True,
     }
 

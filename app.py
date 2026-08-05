@@ -25,7 +25,6 @@ from bid_assistant.models import (
     ReviewIssue,
     ReviewReport,
     ScoringItem,
-    SubmissionItem,
     TenderAnalysis,
 )
 from bid_assistant.ocr import MinerUClient
@@ -46,9 +45,7 @@ from bid_assistant.reviewer import build_export_checklist, build_review_report
 from bid_assistant.storage import ProjectArchiveError, ProjectStore, format_beijing_time, safe_filename
 from bid_assistant.submission import (
     ATTACHMENT_CATEGORY_LABELS,
-    SUBMISSION_CATEGORIES,
-    summarize_submission_items,
-    sync_submission_items,
+    build_attachment_inventory,
 )
 
 
@@ -73,7 +70,6 @@ CATEGORY_LABELS = {
 }
 STATUS_OPTIONS = ["待确认", "已确认", "忽略", "待核对"]
 REVIEW_STATUS_OPTIONS = ["待处理", "已处理", "忽略"]
-SUBMISSION_STATUS_OPTIONS = ["待准备", "已备妥", "不适用"]
 PROJECT_STATUS_LABELS = {
     "new": "新建",
     "uploaded": "已上传",
@@ -84,7 +80,7 @@ PROJECT_STATUS_LABELS = {
     "draft_generated": "草稿已生成",
     "review_generated": "复核报告已生成",
     "exported": "Word 已导出",
-    "packaged": "提交包已生成",
+    "packaged": "交付包已生成",
 }
 
 
@@ -234,23 +230,9 @@ def _load_review(store: ProjectStore, project_id: str) -> ReviewReport | None:
     return ReviewReport.model_validate(payload) if payload else None
 
 
-def _load_submission_items(store: ProjectStore, project_id: str) -> list[SubmissionItem]:
-    payload = store.load_json(project_id, "submission_checklist", [])
-    return [SubmissionItem.model_validate(item) for item in payload]
-
-
 def _parsed_fingerprint(document: ParsedDocument) -> str:
     payload = document.model_dump_json().encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
-
-
-def _submission_rows(items: list[SubmissionItem]) -> list[dict]:
-    rows = []
-    for item in items:
-        row = item.model_dump()
-        row["attachment"] = item.attachment or "未关联"
-        rows.append(row)
-    return rows
 
 
 @st.cache_data(show_spinner=False)
@@ -453,7 +435,7 @@ for column, step in zip(step_columns, workflow["steps"], strict=True):
     column.caption(f"{'✓' if step['complete'] else '○'} {step['label']}")
 st.caption(
     f"已关联知识资料：{workflow['knowledge_files']} 个文件 · "
-    f"提交附件：{workflow['attachment_files']} 个文件"
+    f"补充附件：{workflow['attachment_files']} 个文件"
 )
 
 tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export, tab_submission = st.tabs(
@@ -464,7 +446,7 @@ tab_upload, tab_analysis, tab_knowledge, tab_generate, tab_review, tab_export, t
         "4. 章节生成",
         "5. 复核检查",
         "6. Word 导出",
-        "7. 提交清单",
+        "7. 交付打包",
     ],
     key=f"project_tabs_{current_id}",
     on_change="rerun",
@@ -1401,220 +1383,74 @@ with tab_export:
 
 
 with tab_submission:
-    st.subheader("附件目录与最终提交清单")
-    analysis = _load_analysis(store, current_id)
-    submission_items = _load_submission_items(store, current_id)
-    attachment_files = store.list_attachment_files(current_id)
-    attachment_refs = {
-        f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
-        for category_id, paths in attachment_files.items()
-        for path in paths
-    }
-    submission_summary = summarize_submission_items(submission_items, attachment_refs)
-
-    summary_columns = st.columns(5)
-    summary_columns[0].metric("清单项", submission_summary["total"])
-    summary_columns[1].metric("必交项", submission_summary["required"])
-    summary_columns[2].metric("已备妥", submission_summary["ready"])
-    summary_columns[3].metric("待准备", submission_summary["pending_required"])
-    summary_columns[4].metric("已关联附件", submission_summary["linked"])
-
-    if submission_summary["complete"]:
-        st.success("所有必交项均已备妥或明确标记为不适用。")
-    elif submission_items:
-        st.warning(f"仍有 {submission_summary['pending_required']} 个必交项待准备。")
-    if submission_summary["broken_links"]:
-        st.error(f"有 {submission_summary['broken_links']} 个清单项关联的附件已不存在。")
-
-    sync_label = "同步招标材料" if submission_items else "从分析结果生成清单"
-    if st.button(
-        sync_label,
-        disabled=analysis is None,
-        key=f"sync_submission_{current_id}",
-        icon=":material/sync:",
-        help="材料清单无需上传文件；系统会从分析结果同步，也可以在下方表格手工新增。",
-    ):
-        synced = sync_submission_items(analysis, submission_items)
-        store.save_json(current_id, "submission_checklist", [item.model_dump() for item in synced])
-        st.session_state.pop(f"submission_editor_{current_id}", None)
-        if synced:
-            st.session_state["project_flash"] = f"提交清单已同步，共 {len(synced)} 项"
-        else:
-            st.session_state["project_flash"] = (
-                "分析结果未识别到所需材料，清单仍为空；请在提交清单表格中手工新增并保存。"
-            )
-        st.rerun()
-
-    st.markdown("#### 提交附件（真实文件）")
-    upload_columns = st.columns([1, 3])
-    attachment_category = upload_columns[0].selectbox(
-        "附件类别",
-        options=list(ATTACHMENT_CATEGORY_LABELS),
-        format_func=lambda value: ATTACHMENT_CATEGORY_LABELS[value],
-        key=f"attachment_category_{current_id}",
-    )
-    attachment_uploads = upload_columns[1].file_uploader(
-        "选择附件",
-        accept_multiple_files=True,
-        key=(
-            f"attachment_upload_{current_id}_"
-            f"{st.session_state.get(f'attachment_upload_nonce_{current_id}', 0)}"
-        ),
-    )
-    if st.button(
-        "保存附件",
-        disabled=not attachment_uploads,
-        key=f"save_attachments_{current_id}",
-        icon=":material/upload_file:",
-    ):
-        for item in attachment_uploads:
-            store.save_attachment_file(current_id, attachment_category, item.name, item.getvalue())
-        nonce_key = f"attachment_upload_nonce_{current_id}"
-        st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
-        st.session_state["project_flash"] = f"已保存 {len(attachment_uploads)} 个提交附件"
-        st.rerun()
-
-    attachment_files = store.list_attachment_files(current_id)
-    for category_id, label in ATTACHMENT_CATEGORY_LABELS.items():
-        paths = attachment_files[category_id]
-        with st.expander(f"{label}（{len(paths)}）", expanded=bool(paths)):
-            if not paths:
-                st.caption("暂无附件")
-                continue
-            for path in paths:
-                reference = f"{category_id}/{path.name}"
-                file_columns = st.columns([5, 1, 1])
-                file_columns[0].write(f"{path.name} · {path.stat().st_size / 1024:.1f} KB")
-                file_columns[1].download_button(
-                    "下载",
-                    data=path.read_bytes(),
-                    file_name=path.name,
-                    mime=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                    key=f"download_attachment_{current_id}_{reference}",
-                    icon=":material/download:",
-                )
-                if file_columns[2].button(
-                    "移除",
-                    key=f"delete_attachment_{current_id}_{reference}",
-                    icon=":material/delete:",
-                ):
-                    store.delete_attachment_file(current_id, reference)
-                    st.session_state["project_flash"] = f"已移除附件：{path.name}"
-                    st.rerun()
-
-    st.markdown("#### 最终提交材料清单（系统内填写，无需上传清单文件）")
-    attachment_files = store.list_attachment_files(current_id)
-    current_attachment_refs = {
-        f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
-        for category_id, paths in attachment_files.items()
-        for path in paths
-    }
-    existing_attachment_refs = {item.attachment for item in submission_items if item.attachment}
-    attachment_options = ["未关联"] + sorted(current_attachment_refs | existing_attachment_refs)
-    submission_columns = [
-        "id",
-        "category",
-        "name",
-        "source_requirement_id",
-        "source_page",
-        "required",
-        "status",
-        "attachment",
-        "note",
-    ]
-    submission_frame = pd.DataFrame(_submission_rows(submission_items), columns=submission_columns)
-    if not submission_items:
-        st.info("当前清单为空。请先从分析结果生成；若未识别到材料，请在下表新增行并保存。")
-    edited_submission = st.data_editor(
-        submission_frame,
-        key=f"submission_editor_{current_id}",
-        num_rows="dynamic",
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "id": None,
-            "source_requirement_id": None,
-            "category": st.column_config.SelectboxColumn(
-                "类别", options=SUBMISSION_CATEGORIES, required=True, width="small"
-            ),
-            "name": st.column_config.TextColumn("材料名称", required=True, width="large"),
-            "source_page": st.column_config.NumberColumn("页码", min_value=1, step=1, width="small"),
-            "required": st.column_config.CheckboxColumn("必交", default=True, width="small"),
-            "status": st.column_config.SelectboxColumn(
-                "状态", options=SUBMISSION_STATUS_OPTIONS, required=True, width="small"
-            ),
-            "attachment": st.column_config.SelectboxColumn(
-                "关联附件", options=attachment_options, width="medium"
-            ),
-            "note": st.column_config.TextColumn("备注", width="large"),
-        },
-    )
-    submission_records = (
-        edited_submission.to_dict("records") if isinstance(edited_submission, pd.DataFrame) else edited_submission
-    )
-    edited_items: list[SubmissionItem] = []
-    for row in submission_records:
-        name = str(_clean_value(row.get("name"))).strip()
-        if not name:
-            continue
-        category = str(_clean_value(row.get("category"), "其他"))
-        status = str(_clean_value(row.get("status"), "待准备"))
-        edited_items.append(
-            SubmissionItem(
-                id=str(_clean_value(row.get("id"), "")) or SubmissionItem(name=name).id,
-                category=category if category in SUBMISSION_CATEGORIES else "其他",
-                name=name,
-                source_requirement_id=str(_clean_value(row.get("source_requirement_id"))),
-                source_page=int(row["source_page"]) if _clean_value(row.get("source_page"), None) else None,
-                required=bool(_clean_value(row.get("required"), True)),
-                status=status if status in SUBMISSION_STATUS_OPTIONS else "待准备",
-                attachment=(
-                    ""
-                    if str(_clean_value(row.get("attachment"))) == "未关联"
-                    else str(_clean_value(row.get("attachment")))
-                ),
-                note=str(_clean_value(row.get("note"))).strip(),
-            )
-        )
-
-    action_columns = st.columns([1, 1, 4])
-    if action_columns[0].button(
-        "保存清单",
-        type="primary",
-        key=f"save_submission_{current_id}",
-        icon=":material/save:",
-    ):
-        store.save_json(current_id, "submission_checklist", [item.model_dump() for item in edited_items])
-        saved_summary = summarize_submission_items(edited_items, current_attachment_refs)
-        message = "提交清单已完成" if saved_summary["complete"] else "提交清单已保存"
-        st.session_state["project_flash"] = message
-        st.rerun()
-
-    csv_rows = [
-        {
-            "类别": item.category,
-            "材料名称": item.name,
-            "原文页码": item.source_page or "",
-            "必交": "是" if item.required else "否",
-            "状态": item.status,
-            "关联附件": item.attachment,
-            "备注": item.note,
-        }
-        for item in edited_items
-    ]
-    csv_data = ("\ufeff" + pd.DataFrame(csv_rows).to_csv(index=False)).encode("utf-8")
-    action_columns[1].download_button(
-        "导出清单",
-        data=csv_data,
-        file_name=safe_filename(f"{project['name']}_最终提交材料清单.csv"),
-        mime="text/csv;charset=utf-8",
-        disabled=not edited_items,
-        key=f"download_submission_{current_id}",
-        icon=":material/download:",
-    )
-
-    st.markdown("#### 提交包")
+    st.subheader("交付打包")
     export_versions = store.list_export_versions(current_id)
+    attachment_files = store.list_attachment_files(current_id)
+    package_versions = store.list_package_versions(current_id)
+    summary_columns = st.columns(3)
+    summary_columns[0].metric("Word 版本", len(export_versions))
+    summary_columns[1].metric("补充附件", sum(len(paths) for paths in attachment_files.values()))
+    summary_columns[2].metric("交付包", len(package_versions))
+
+    with st.expander("补充附件（可选）", expanded=False):
+        upload_columns = st.columns([1, 3])
+        attachment_category = upload_columns[0].selectbox(
+            "附件类别",
+            options=list(ATTACHMENT_CATEGORY_LABELS),
+            format_func=lambda value: ATTACHMENT_CATEGORY_LABELS[value],
+            key=f"attachment_category_{current_id}",
+        )
+        attachment_uploads = upload_columns[1].file_uploader(
+            "选择附件",
+            accept_multiple_files=True,
+            key=(
+                f"attachment_upload_{current_id}_"
+                f"{st.session_state.get(f'attachment_upload_nonce_{current_id}', 0)}"
+            ),
+        )
+        if st.button(
+            "保存附件",
+            disabled=not attachment_uploads,
+            key=f"save_attachments_{current_id}",
+            icon=":material/upload_file:",
+        ):
+            for item in attachment_uploads:
+                store.save_attachment_file(current_id, attachment_category, item.name, item.getvalue())
+            nonce_key = f"attachment_upload_nonce_{current_id}"
+            st.session_state[nonce_key] = st.session_state.get(nonce_key, 0) + 1
+            st.session_state["project_flash"] = f"已保存 {len(attachment_uploads)} 个补充附件"
+            st.rerun()
+
+        attachment_files = store.list_attachment_files(current_id)
+        if not any(attachment_files.values()):
+            st.caption("暂无补充附件，本次将只打包所选 Word。")
+        for category_id, label in ATTACHMENT_CATEGORY_LABELS.items():
+            paths = attachment_files[category_id]
+            if not paths:
+                continue
+            with st.expander(f"{label}（{len(paths)}）", expanded=False):
+                for path in paths:
+                    reference = f"{category_id}/{path.name}"
+                    file_columns = st.columns([5, 1, 1])
+                    file_columns[0].write(f"{path.name} · {path.stat().st_size / 1024:.1f} KB")
+                    file_columns[1].download_button(
+                        "下载",
+                        data=path.read_bytes(),
+                        file_name=path.name,
+                        mime=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        key=f"download_attachment_{current_id}_{reference}",
+                        icon=":material/download:",
+                    )
+                    if file_columns[2].button(
+                        "移除",
+                        key=f"delete_attachment_{current_id}_{reference}",
+                        icon=":material/delete:",
+                    ):
+                        store.delete_attachment_file(current_id, reference)
+                        st.session_state["project_flash"] = f"已移除附件：{path.name}"
+                        st.rerun()
+
+    st.markdown("#### 1. 选择 Word 成品")
     selected_word_version = None
     selected_word_quality = None
     if export_versions:
@@ -1643,20 +1479,53 @@ with tab_submission:
     else:
         st.info("请先在“6. Word 导出”中生成至少一个 Word 版本。")
 
-    has_unsaved_changes = (
-        [item.model_dump() for item in edited_items]
-        != [item.model_dump() for item in submission_items]
+    st.markdown("#### 2. 生成交付包")
+    attachment_files = store.list_attachment_files(current_id)
+    attachment_refs = {
+        f"{ATTACHMENT_CATEGORY_LABELS[category_id]}/{path.name}"
+        for category_id, paths in attachment_files.items()
+        for path in paths
+    }
+    inventory_items = build_attachment_inventory(attachment_files)
+    package_rows = []
+    if selected_word_version:
+        package_rows.append(
+            {
+                "category": "投标文件",
+                "filename": selected_word_version["filename"],
+                "size": f"{selected_word_version['size'] / 1024:.1f} KB",
+            }
+        )
+    package_rows.extend(
+        {
+            "category": ATTACHMENT_CATEGORY_LABELS[category_id],
+            "filename": path.name,
+            "size": f"{path.stat().st_size / 1024:.1f} KB",
+        }
+        for category_id, paths in attachment_files.items()
+        for path in paths
     )
+    if package_rows:
+        st.dataframe(
+            package_rows,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "category": st.column_config.TextColumn("类别", width="small"),
+                "filename": st.column_config.TextColumn("本次包内容", width="large"),
+                "size": st.column_config.TextColumn("大小", width="small"),
+            },
+        )
+
     review = _load_review(store, current_id)
     package_readiness = build_package_readiness(
         selected_word_version,
-        submission_items,
-        current_attachment_refs,
+        inventory_items,
+        attachment_refs,
         review,
-        has_unsaved_changes=has_unsaved_changes,
         word_quality=selected_word_quality,
     )
-    package_status_labels = {"pass": "通过", "warning": "需确认", "block": "不可打包"}
+    package_status_labels = {"pass": "通过", "warning": "需确认", "block": "不可生成"}
     st.dataframe(
         [
             {
@@ -1677,7 +1546,7 @@ with tab_submission:
 
     package_acknowledged = not package_readiness["requires_confirmation"]
     if package_readiness["blocking_count"]:
-        st.error(f"存在 {package_readiness['blocking_count']} 个不可打包项，请先处理后再生成提交包。")
+        st.error("Word 尚未准备完成，暂不能生成交付包。")
     if package_readiness["requires_confirmation"]:
         package_acknowledged = st.checkbox(
             "我已知悉复核风险，本次生成包仅用于内部预审",
@@ -1685,27 +1554,27 @@ with tab_submission:
         )
 
     package_note = st.text_input(
-        "提交包版本说明",
+        "版本说明",
         placeholder="例如：第一次内部预审",
         key=f"package_note_{current_id}",
     )
     if st.button(
-        "生成提交包",
+        "生成交付包",
         type="primary",
         key=f"create_package_{current_id}",
         disabled=not package_readiness["can_package"] or not package_acknowledged,
         icon=":material/folder_zip:",
     ):
-        with st.spinner("正在核对文件并生成提交包..."):
+        with st.spinner("正在核对文件并生成交付包..."):
             target = store.next_package_version(
                 current_id,
-                safe_filename(f"{project['name']}_最终提交包.zip"),
+                safe_filename(f"{project['name']}_交付包.zip"),
             )
             create_submission_package(
                 target["path"],
                 project=project,
                 word_version=selected_word_version,
-                items=submission_items,
+                items=inventory_items,
                 attachment_files=attachment_files,
                 review_summary={
                     "pending": review.pending_count() if review else 0,
@@ -1728,12 +1597,12 @@ with tab_submission:
                 note=package_note,
             )
             store.update_project(current_id, status="packaged")
-        st.session_state["project_flash"] = f"提交包 P{target['version']:03d} 已生成"
+        st.session_state["project_flash"] = f"交付包 P{target['version']:03d} 已生成"
         st.rerun()
 
     package_versions = store.list_package_versions(current_id)
     if package_versions:
-        st.markdown("##### 提交包版本记录")
+        st.markdown("##### 交付包版本记录")
         st.dataframe(
             [
                 {
@@ -1761,7 +1630,7 @@ with tab_submission:
         )
         package_by_id = {item["id"]: item for item in package_versions}
         selected_package_id = st.selectbox(
-            "选择下载提交包版本",
+            "选择下载交付包版本",
             options=list(package_by_id),
             format_func=lambda version_id: (
                 f"P{package_by_id[version_id]['version']:03d} | "
@@ -1783,7 +1652,7 @@ with tab_submission:
                 f"{verification['content_size'] / 1024 / 1024:.2f} MB。"
             )
         else:
-            st.error("完整性校验不通过，已停止提交包下载。")
+            st.error("完整性校验不通过，已停止交付包下载。")
             st.dataframe(
                 [{"issue": item} for item in verification["errors"]],
                 width="stretch",
@@ -1799,7 +1668,7 @@ with tab_submission:
         )
         download_columns = st.columns([1, 1, 3])
         download_columns[0].download_button(
-            "下载所选提交包",
+            "下载所选交付包",
             data=selected_package["path"].read_bytes() if verification["valid"] else b"",
             file_name=selected_package["filename"],
             mime="application/zip",
@@ -1821,4 +1690,4 @@ with tab_submission:
             f"校验时间：{verification['verified_at'].replace('T', ' ').replace('+00:00', ' UTC')}"
         )
     else:
-        st.caption("尚未生成提交包版本。")
+        st.caption("尚未生成交付包版本。")
