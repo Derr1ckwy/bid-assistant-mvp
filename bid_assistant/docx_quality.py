@@ -191,6 +191,25 @@ def verify_docx_output(
         }
     )
 
+    heading_fonts_ok = True
+    for style_name in ("Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"):
+        try:
+            style = document.styles[style_name]
+        except KeyError:
+            heading_fonts_ok = False
+            continue
+        if 'w:eastAsia="宋体"' not in style._element.xml:
+            heading_fonts_ok = False
+    if not heading_fonts_ok:
+        warnings.append("标题样式未全部使用宋体。")
+    checks.append(
+        {
+            "label": "标题字体",
+            "status": "pass" if heading_fonts_ok else "warning",
+            "detail": "封面及各级标题统一使用宋体。",
+        }
+    )
+
     missing_spacing_styles = []
     for style_name in ("Title", "Heading 1", "Heading 2", "Heading 3"):
         try:

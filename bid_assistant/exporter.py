@@ -17,10 +17,10 @@ from bid_assistant.models import ChapterDraft, ReviewReport, TenderAnalysis
 
 BODY_FONT = "Times New Roman"
 BODY_FONT_EAST_ASIA = "宋体"
-HEADING_FONT = "Arial"
-HEADING_FONT_EAST_ASIA = "黑体"
-COVER_FONT = "STZhongsong"
-COVER_FONT_EAST_ASIA = "华文中宋"
+HEADING_FONT = BODY_FONT
+HEADING_FONT_EAST_ASIA = BODY_FONT_EAST_ASIA
+COVER_FONT = BODY_FONT
+COVER_FONT_EAST_ASIA = BODY_FONT_EAST_ASIA
 CONTENT_WIDTH_DXA = 8901
 TABLE_INDENT_DXA = 0
 BLACK = "000000"
@@ -493,10 +493,10 @@ def _style_table(
                 _set_cell_no_wrap(cell)
             _set_cell_margins(
                 cell,
-                top=80 if compact else 110,
-                bottom=80 if compact else 110,
-                start=110 if compact else 140,
-                end=110 if compact else 140,
+                top=50 if compact else 110,
+                bottom=50 if compact else 110,
+                start=90 if compact else 140,
+                end=90 if compact else 140,
             )
             if row_index == 0:
                 _set_cell_shading(cell, LIGHT_GRAY)
@@ -510,7 +510,7 @@ def _style_table(
                 paragraph.paragraph_format.first_line_indent = None
                 paragraph.paragraph_format.space_before = Pt(0)
                 paragraph.paragraph_format.space_after = Pt(0)
-                paragraph.paragraph_format.line_spacing = 1.2
+                paragraph.paragraph_format.line_spacing = 1.1 if compact else 1.2
                 paragraph.alignment = (
                     WD_ALIGN_PARAGRAPH.CENTER
                     if row_index == 0 or column_index in center_columns
@@ -519,7 +519,7 @@ def _style_table(
                 for run in paragraph.runs:
                     _format_run(
                         run,
-                        size=9.5 if compact else 10.5,
+                        size=12,
                         bold=True if row_index == 0 else None,
                         color=BLACK,
                     )
@@ -561,7 +561,7 @@ def _add_cover(document: Document, analysis: TenderAnalysis) -> None:
     title.paragraph_format.space_before = Pt(76)
     title.paragraph_format.space_after = Pt(42)
     title.paragraph_format.line_spacing = 1.3
-    title_size = 22 if len(project_name) <= 22 else 19 if len(project_name) <= 34 else 17
+    title_size = 22 if len(project_name) <= 22 else 17 if len(project_name) <= 34 else 15.5
     title_run = title.add_run(project_name)
     _format_run(
         title_run,
@@ -869,7 +869,7 @@ def _add_review_appendix(document: Document, review: ReviewReport) -> None:
         cells[3].text = item.status
     _style_table(
         table,
-        [1500, 4700, 1200, 1501],
+        [1500, 4500, 1200, 1701],
         center_columns={0, 2, 3},
         nowrap_columns={2, 3},
         compact=True,
@@ -877,7 +877,7 @@ def _add_review_appendix(document: Document, review: ReviewReport) -> None:
     for row, issue in zip(table.rows[1:], review.issues, strict=True):
         if issue.severity == "高":
             for run in row.cells[0].paragraphs[0].runs:
-                _format_run(run, size=9.5, bold=True, color=BLACK)
+                _format_run(run, size=12, bold=True, color=BLACK)
 
 
 def _add_contents(document: Document, drafts: list[ChapterDraft]) -> None:
@@ -1012,7 +1012,7 @@ def _add_qualification_images(document: Document, image_paths: list[Path]) -> No
         caption.paragraph_format.first_line_indent = None
         caption.paragraph_format.space_after = Pt(4)
         caption_text = re.sub(r"[_-]+", " ", path.stem).strip() or f"资质材料 {index + 1}"
-        _format_run(caption.add_run(caption_text), size=10, color=BLACK)
+        _format_run(caption.add_run(caption_text), size=12, color=BLACK)
 
 
 def _add_generated_sections(

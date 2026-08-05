@@ -87,6 +87,9 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
 
     cover_title = next(paragraph for paragraph in reopened.paragraphs if paragraph.text == "智慧园区项目")
     assert cover_title.runs[0]._element.find(qn("w:rPr")).find(qn("w:spacing")) is not None
+    assert 'w:eastAsia="宋体"' in cover_title.runs[0]._element.xml
+    for style_name in ("Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"):
+        assert 'w:eastAsia="宋体"' in reopened.styles[style_name]._element.xml
 
     cover_metadata = reopened.tables[0]
     assert [cell.width for cell in cover_metadata.rows[0].cells] == [2750 * 635, 6151 * 635]
@@ -183,6 +186,12 @@ def test_export_cleans_model_markdown_and_uses_formal_monochrome_tables(tmp_path
     header_color = content_table.rows[0].cells[0].paragraphs[0].runs[0].font.color.rgb
     assert header_fill == "F2F2F2"
     assert str(header_color) == "000000"
+    for row in content_table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                for run in paragraph.runs:
+                    assert run.font.size.pt == 12
+                    assert 'w:eastAsia="宋体"' in run._element.xml
 
 
 def test_internal_appendices_are_opt_in(tmp_path: Path) -> None:
