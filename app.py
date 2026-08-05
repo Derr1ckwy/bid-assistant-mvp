@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import mimetypes
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +13,7 @@ from bid_assistant.acceptance import build_acceptance_report, build_analysis_acc
 from bid_assistant.analyzer import analyze_document
 from bid_assistant.config import Settings, save_llm_settings, settings
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
-from bid_assistant.exporter import export_docx
+from bid_assistant.exporter import build_draft_docx, export_docx
 from bid_assistant.generator import generate_chapter
 from bid_assistant.knowledge import clear_knowledge_cache, search_knowledge
 from bid_assistant.llm import OpenAICompatibleClient
@@ -56,7 +57,19 @@ st.markdown(
     .block-container {padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1500px;}
     h1, h2, h3 {letter-spacing: 0;}
     [data-testid="stMetricValue"] {font-size: 1.4rem;}
+    [data-testid="stToolbar"], [data-testid="stStatusWidget"], [data-testid="stToast"],
+    [data-testid="stSkillsNudgeAnchor"] {display: none !important;}
+    [data-testid="stDataFrameColumnMenu"], [data-testid="stDataFrameStatisticsMenu"] {display: none !important;}
+    [data-testid="stFileUploaderDropzone"] button p {font-size: 0;}
+    [data-testid="stFileUploaderDropzone"] button p::after {content: "选择文件"; font-size: .875rem;}
+    [data-testid="stFileUploaderDropzoneInstructions"] {display: none;}
     .status-note {border-left: 4px solid #2f5597; padding: .65rem .85rem; background: #f4f7fb;}
+    .cn-table-wrap {overflow-x: auto; border: 1px solid #d9dee5; border-radius: 4px; margin: .35rem 0 1rem;}
+    .cn-table {width: 100%; min-width: 680px; border-collapse: collapse; font-size: .92rem; color: #20262e;}
+    .cn-table th {background: #f3f5f7; font-weight: 600; text-align: left; white-space: nowrap;}
+    .cn-table th, .cn-table td {padding: .55rem .7rem; border-bottom: 1px solid #e4e7eb; vertical-align: top;}
+    .cn-table td {white-space: normal; overflow-wrap: anywhere;}
+    .cn-table tr:last-child td {border-bottom: 0;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -104,6 +117,28 @@ def _clean_value(value, default=""):
     if isinstance(is_missing, bool) and is_missing:
         return default
     return value
+
+
+def _display_chinese_table(rows: list[dict], columns: list[tuple[str, str]]) -> None:
+    """Render read-only data without Streamlit's English grid menus."""
+    if not rows:
+        return
+
+    def render_value(value) -> str:
+        cleaned = _clean_value(value, "-")
+        text = str(cleaned) if cleaned != "" else "-"
+        return html.escape(text).replace("\n", "<br>")
+
+    header = "".join(f"<th>{html.escape(label)}</th>" for _, label in columns)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{render_value(row.get(key))}</td>" for key, _ in columns) + "</tr>"
+        for row in rows
+    )
+    st.markdown(
+        f'<div class="cn-table-wrap"><table class="cn-table"><thead><tr>{header}</tr></thead>'
+        f"<tbody>{body}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _requirement_rows(items: list[RequirementItem]) -> list[dict]:
@@ -726,17 +761,9 @@ with tab_analysis:
                     )
                 if detail_rows:
                     with st.expander(f"查看验收明细（{len(detail_rows)}）"):
-                        st.dataframe(
+                        _display_chinese_table(
                             detail_rows,
-                            width="stretch",
-                            hide_index=True,
-                            column_config={
-                                "结果": st.column_config.TextColumn("结果", width="small"),
-                                "类别": st.column_config.TextColumn("类别", width="small"),
-                                "内容": st.column_config.TextColumn("内容", width="large"),
-                                "页码": st.column_config.NumberColumn("页码", width="small"),
-                                "处理": st.column_config.TextColumn("处理", width="small"),
-                            },
+                            [("结果", "结果"), ("类别", "类别"), ("内容", "内容"), ("页码", "页码"), ("处理", "处理")],
                         )
 
                 acceptance_report = build_acceptance_report(acceptance)
@@ -1058,6 +1085,17 @@ with tab_generate:
                 store.update_project(current_id, status="draft_generated")
                 st.success("正文修改已保存")
 
+            draft_word = build_draft_docx(analysis, edited_drafts)
+            st.download_button(
+                "下载当前草稿 Word",
+                data=draft_word,
+                file_name=safe_filename(f"{analysis.project_info.project_name or project['name']}_章节草稿.docx"),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"download_draft_word_{current_id}",
+                icon=":material/download:",
+            )
+            st.caption("下载内容以当前编辑框为准，无需先保存；该文件不进入正式 Word 版本记录。")
+
             versions = store.list_draft_versions(current_id)
             with st.expander(f"草稿版本记录（{len(versions)}）", expanded=False):
                 if not versions:
@@ -1190,15 +1228,9 @@ with tab_export:
             }
             for item in readiness["checks"]
         ]
-        st.dataframe(
+        _display_chinese_table(
             checklist_rows,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "check": st.column_config.TextColumn("检查项", width="small"),
-                "status": st.column_config.TextColumn("结果", width="small"),
-                "detail": st.column_config.TextColumn("说明", width="large"),
-            },
+            [("check", "检查项"), ("status", "结果"), ("detail", "说明")],
         )
 
         acknowledged = not readiness["requires_confirmation"]
@@ -1288,23 +1320,27 @@ with tab_export:
                         "qualification_images": item.get("qualification_image_count", 0),
                     }
                 )
-            st.dataframe(
+            _display_chinese_table(
                 history_rows,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "version": st.column_config.TextColumn("版本", width="small"),
-                    "created_at": st.column_config.TextColumn("生成时间", width="medium"),
-                    "chapters": st.column_config.NumberColumn("章节", width="small"),
-                    "pending": st.column_config.NumberColumn("待处理", width="small"),
-                    "high": st.column_config.NumberColumn("高风险", width="small"),
-                    "note": st.column_config.TextColumn("版本说明", width="large"),
-                    "template": st.column_config.TextColumn("模板", width="medium"),
-                    "qualification_images": st.column_config.NumberColumn("资质图", width="small"),
-                },
+                [
+                    ("version", "版本"),
+                    ("created_at", "生成时间"),
+                    ("chapters", "章节"),
+                    ("pending", "待处理"),
+                    ("high", "高风险"),
+                    ("note", "版本说明"),
+                    ("template", "模板"),
+                    ("qualification_images", "资质图"),
+                ],
             )
 
             version_by_id = {item["id"]: item for item in versions}
+            export_version_state_key = f"export_version_{current_id}"
+            reset_export_version_key = f"reset_export_version_{current_id}"
+            if st.session_state.pop(reset_export_version_key, False):
+                st.session_state.pop(export_version_state_key, None)
+            elif st.session_state.get(export_version_state_key) not in version_by_id:
+                st.session_state.pop(export_version_state_key, None)
             selected_version_id = st.selectbox(
                 "选择下载版本",
                 options=list(version_by_id),
@@ -1312,7 +1348,7 @@ with tab_export:
                     f"V{version_by_id[version_id]['version']:03d} | "
                     f"{version_by_id[version_id]['filename']}"
                 ),
-                key=f"export_version_{current_id}",
+                key=export_version_state_key,
             )
             selected_version = version_by_id[selected_version_id]
             word_size, word_modified_ns = _docx_file_signature(selected_version["path"])
@@ -1336,26 +1372,22 @@ with tab_export:
                     )
             else:
                 st.error("Word 成品质检不通过，已停止该版本下载。")
-                st.dataframe(
+                _display_chinese_table(
                     [{"issue": item} for item in word_quality["errors"]],
-                    width="stretch",
-                    hide_index=True,
-                    column_config={"issue": st.column_config.TextColumn("质检错误", width="large")},
+                    [("issue", "质检错误")],
                 )
             if word_quality["warnings"]:
                 with st.expander(f"查看质检提示（{len(word_quality['warnings'])}）"):
-                    st.dataframe(
+                    _display_chinese_table(
                         [{"issue": item} for item in word_quality["warnings"]],
-                        width="stretch",
-                        hide_index=True,
-                        column_config={"issue": st.column_config.TextColumn("提示项", width="large")},
+                        [("issue", "提示项")],
                     )
 
             quality_report = build_docx_quality_report(
                 word_quality,
                 word_version=selected_version,
             )
-            word_download_columns = st.columns([1, 1, 3])
+            word_download_columns = st.columns([1, 1, 1, 2])
             word_download_columns[0].download_button(
                 "下载所选 Word",
                 data=selected_version["path"].read_bytes() if word_quality["valid"] else b"",
@@ -1373,6 +1405,42 @@ with tab_export:
                 width="stretch",
                 icon=":material/fact_check:",
             )
+            pending_export_delete_key = f"pending_export_delete_{current_id}"
+            if word_download_columns[2].button(
+                "删除此版本",
+                key=f"request_delete_export_{current_id}_{selected_version_id}",
+                icon=":material/delete:",
+                width="stretch",
+            ):
+                st.session_state[pending_export_delete_key] = selected_version_id
+
+            if st.session_state.get(pending_export_delete_key) == selected_version_id:
+                st.warning(
+                    f"确认删除 V{selected_version['version']:03d}？Word 文件和版本记录将被永久删除，"
+                    "已经生成的交付包不受影响。"
+                )
+                delete_columns = st.columns([1, 1, 4])
+                if delete_columns[0].button(
+                    "确认删除",
+                    type="primary",
+                    key=f"confirm_delete_export_{current_id}_{selected_version_id}",
+                ):
+                    deleted = store.delete_export_version(current_id, selected_version_id)
+                    st.session_state.pop(pending_export_delete_key, None)
+                    st.session_state[reset_export_version_key] = True
+                    _verify_docx_cached.clear()
+                    st.session_state["project_flash"] = (
+                        f"已删除 Word V{selected_version['version']:03d}"
+                        if deleted
+                        else "该 Word 版本已不存在"
+                    )
+                    st.rerun()
+                if delete_columns[1].button(
+                    "取消",
+                    key=f"cancel_delete_export_{current_id}_{selected_version_id}",
+                ):
+                    st.session_state.pop(pending_export_delete_key, None)
+                    st.rerun()
             st.caption(
                 f"实际 SHA-256：{word_quality['sha256']} · "
                 f"{word_quality['size'] / 1024 / 1024:.2f} MB · "
@@ -1506,15 +1574,9 @@ with tab_submission:
         for path in paths
     )
     if package_rows:
-        st.dataframe(
+        _display_chinese_table(
             package_rows,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "category": st.column_config.TextColumn("类别", width="small"),
-                "filename": st.column_config.TextColumn("本次包内容", width="large"),
-                "size": st.column_config.TextColumn("大小", width="small"),
-            },
+            [("category", "类别"), ("filename", "本次包内容"), ("size", "大小")],
         )
 
     review = _load_review(store, current_id)
@@ -1526,7 +1588,7 @@ with tab_submission:
         word_quality=selected_word_quality,
     )
     package_status_labels = {"pass": "通过", "warning": "需确认", "block": "不可生成"}
-    st.dataframe(
+    _display_chinese_table(
         [
             {
                 "check": item["label"],
@@ -1535,13 +1597,7 @@ with tab_submission:
             }
             for item in package_readiness["checks"]
         ],
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "check": st.column_config.TextColumn("检查项", width="small"),
-            "status": st.column_config.TextColumn("结果", width="small"),
-            "detail": st.column_config.TextColumn("说明", width="large"),
-        },
+        [("check", "检查项"), ("status", "结果"), ("detail", "说明")],
     )
 
     package_acknowledged = not package_readiness["requires_confirmation"]
@@ -1603,7 +1659,7 @@ with tab_submission:
     package_versions = store.list_package_versions(current_id)
     if package_versions:
         st.markdown("##### 交付包版本记录")
-        st.dataframe(
+        _display_chinese_table(
             [
                 {
                     "version": f"P{item['version']:03d}",
@@ -1616,17 +1672,15 @@ with tab_submission:
                 }
                 for item in package_versions
             ],
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "version": st.column_config.TextColumn("版本", width="small"),
-                "created_at": st.column_config.TextColumn("生成时间", width="medium"),
-                "word": st.column_config.TextColumn("Word", width="small"),
-                "attachments": st.column_config.NumberColumn("附件", width="small"),
-                "warnings": st.column_config.NumberColumn("风险确认", width="small"),
-                "scope": st.column_config.TextColumn("用途", width="medium"),
-                "note": st.column_config.TextColumn("版本说明", width="large"),
-            },
+            [
+                ("version", "版本"),
+                ("created_at", "生成时间"),
+                ("word", "Word"),
+                ("attachments", "附件"),
+                ("warnings", "风险确认"),
+                ("scope", "用途"),
+                ("note", "版本说明"),
+            ],
         )
         package_by_id = {item["id"]: item for item in package_versions}
         selected_package_id = st.selectbox(
@@ -1653,11 +1707,9 @@ with tab_submission:
             )
         else:
             st.error("完整性校验不通过，已停止交付包下载。")
-            st.dataframe(
+            _display_chinese_table(
                 [{"issue": item} for item in verification["errors"]],
-                width="stretch",
-                hide_index=True,
-                column_config={"issue": st.column_config.TextColumn("校验错误", width="large")},
+                [("issue", "校验错误")],
             )
         if verification["warnings"]:
             st.warning("；".join(verification["warnings"]))

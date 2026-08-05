@@ -359,6 +359,31 @@ def test_word_version_time_is_displayed_in_beijing_time() -> None:
     assert format_beijing_time("2026-08-05T11:40:06.349+08:00") == "2026-08-05 11:40:06"
 
 
+def test_word_export_version_can_be_deleted_without_touching_other_versions(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    project = store.create_project("删除导出版本测试")
+    records = []
+    for content in (b"first", b"second"):
+        target = store.next_output_version(project["id"], "投标文件初稿.docx")
+        target["path"].write_bytes(content)
+        records.append(
+            store.record_export_version(
+                project["id"],
+                target["path"],
+                version=target["version"],
+                chapter_count=1,
+                review_summary={"pending": 0, "high": 0, "medium": 0, "low": 0},
+            )
+        )
+
+    assert store.delete_export_version(project["id"], records[0]["id"]) is True
+    assert store.delete_export_version(project["id"], records[0]["id"]) is False
+    assert store.delete_export_version(project["id"], "../bad") is False
+    assert records[0]["path"].exists() is False
+    assert records[1]["path"].exists() is True
+    assert [item["version"] for item in store.list_export_versions(project["id"])] == [2]
+
+
 def test_word_output_retention_keeps_latest_versions(tmp_path: Path) -> None:
     store = ProjectStore(tmp_path / "data")
     project = store.create_project("导出版本上限测试")

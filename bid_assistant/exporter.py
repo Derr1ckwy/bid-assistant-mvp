@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 import re
 from datetime import date
 from pathlib import Path
@@ -600,6 +601,8 @@ def _add_cover(document: Document, analysis: TenderAnalysis) -> None:
     document_type.alignment = WD_ALIGN_PARAGRAPH.CENTER
     document_type.paragraph_format.first_line_indent = None
     document_type.paragraph_format.space_after = Pt(10)
+    document_type.paragraph_format.line_spacing = Pt(42)
+    document_type.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
     document_type_run = document_type.add_run("投 标 文 件")
     _format_run(
         document_type_run,
@@ -615,6 +618,8 @@ def _add_cover(document: Document, analysis: TenderAnalysis) -> None:
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     subtitle.paragraph_format.first_line_indent = None
     subtitle.paragraph_format.space_after = Pt(88)
+    subtitle.paragraph_format.line_spacing = Pt(24)
+    subtitle.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
     subtitle_run = subtitle.add_run("技术及商务响应文件")
     _format_run(
         subtitle_run,
@@ -1149,3 +1154,45 @@ def export_docx(
         _add_header_footer(document, analysis.project_info.project_name or "未命名投标项目")
     document.save(target)
     return target
+
+
+def build_draft_docx(analysis: TenderAnalysis, drafts: list[ChapterDraft]) -> bytes:
+    """Build an unversioned Word copy of the current chapter editor contents."""
+    document = Document()
+    _configure_document(document)
+    project_name = analysis.project_info.project_name or "未命名投标项目"
+    document.core_properties.title = f"{project_name} - 章节草稿"
+    document.core_properties.subject = "章节编辑草稿"
+    document.core_properties.author = ""
+
+    title = document.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title.paragraph_format.first_line_indent = None
+    title.paragraph_format.space_before = Pt(36)
+    title.paragraph_format.space_after = Pt(12)
+    title.paragraph_format.line_spacing = Pt(30)
+    title.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+    title_size = 20 if len(project_name) <= 22 else 17 if len(project_name) <= 34 else 15.5
+    _format_run(title.add_run(project_name), size=title_size, bold=True, color=BLACK)
+
+    subtitle = document.add_paragraph()
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle.paragraph_format.first_line_indent = None
+    subtitle.paragraph_format.space_after = Pt(36)
+    subtitle.paragraph_format.line_spacing = Pt(24)
+    subtitle.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+    _format_run(subtitle.add_run("章节草稿（内部编辑稿）"), size=14, bold=True, color=BLACK)
+
+    _add_generated_sections(
+        document,
+        analysis,
+        drafts,
+        None,
+        [],
+        include_contents=True,
+        include_internal_appendices=False,
+    )
+    _add_header_footer(document, project_name)
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()

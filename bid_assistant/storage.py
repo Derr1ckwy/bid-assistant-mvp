@@ -651,6 +651,33 @@ class ProjectStore:
                 continue
         return result
 
+    def delete_export_version(self, project_id: str, version_id: str) -> bool:
+        if not _EXPORT_VERSION_PATTERN.fullmatch(version_id):
+            return False
+        project_dir = self.project_dir(project_id)
+        manifest = project_dir / "versions" / "exports" / f"{version_id}.json"
+        if not manifest.is_file():
+            return False
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        filename = payload.get("filename")
+        if (
+            payload.get("id") != version_id
+            or not isinstance(filename, str)
+            or filename != safe_filename(filename)
+        ):
+            return False
+
+        output_dir = (project_dir / "output").resolve()
+        output_path = (output_dir / filename).resolve()
+        if output_path.parent != output_dir or output_path.suffix.lower() != ".docx":
+            return False
+        output_path.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
+        return True
+
     def package_path(self, project_id: str, filename: str) -> Path:
         packages_dir = self.project_dir(project_id) / "packages"
         packages_dir.mkdir(exist_ok=True)

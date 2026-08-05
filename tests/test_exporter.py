@@ -1,11 +1,13 @@
+from io import BytesIO
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_LINE_SPACING
 from docx.oxml.ns import qn
 from docx.shared import Cm
 from PIL import Image
 
-from bid_assistant.exporter import export_docx
+from bid_assistant.exporter import build_draft_docx, export_docx
 from bid_assistant.models import (
     ChapterDraft,
     ProjectInfo,
@@ -88,6 +90,9 @@ def test_export_docx_can_be_reopened(tmp_path: Path) -> None:
     cover_title = next(paragraph for paragraph in reopened.paragraphs if paragraph.text == "智慧园区项目")
     assert cover_title.runs[0]._element.find(qn("w:rPr")).find(qn("w:spacing")) is not None
     assert 'w:eastAsia="宋体"' in cover_title.runs[0]._element.xml
+    document_type = next(paragraph for paragraph in reopened.paragraphs if paragraph.text == "投 标 文 件")
+    assert document_type.paragraph_format.line_spacing_rule == WD_LINE_SPACING.AT_LEAST
+    assert document_type.paragraph_format.line_spacing.pt >= 42
     for style_name in ("Title", "Subtitle", "Heading 1", "Heading 2", "Heading 3"):
         style_xml = reopened.styles[style_name]._element.xml
         assert 'w:eastAsia="宋体"' in style_xml
@@ -221,3 +226,24 @@ def test_internal_appendices_are_opt_in(tmp_path: Path) -> None:
 
     assert "内部核对事项" in text
     assert "内部复核报告" in text
+
+
+def test_build_draft_docx_uses_current_content_without_formal_appendices() -> None:
+    analysis = TenderAnalysis(project_info=ProjectInfo(project_name="章节草稿测试项目"))
+    drafts = [
+        ChapterDraft(
+            chapter_id="c1",
+            title="实施方案",
+            markdown="## 施工组织\n\n这是当前编辑框中的正文。",
+        )
+    ]
+
+    reopened = Document(BytesIO(build_draft_docx(analysis, drafts)))
+    text = "\n".join(paragraph.text for paragraph in reopened.paragraphs)
+
+    assert "章节草稿（内部编辑稿）" in text
+    assert "第 1 章 实施方案" in text
+    assert "这是当前编辑框中的正文。" in text
+    assert "内部核对事项" not in text
+    assert "内部复核报告" not in text
+    assert reopened.styles["Normal"]._element.xml.find('w:eastAsia="宋体"') >= 0
