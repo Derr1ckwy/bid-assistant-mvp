@@ -1,4 +1,5 @@
 from bid_assistant.analyzer import analyze_document
+from bid_assistant.llm import LLMError
 from bid_assistant.models import ParsedDocument, ParsedPage
 
 
@@ -186,3 +187,74 @@ def test_llm_analysis_normalizes_common_small_model_types() -> None:
     assert analysis.mandatory_requirements[0].source_page == 1
     assert analysis.scoring_items[0].points == "30"
     assert analysis.scoring_items[0].confidence == 0.8
+
+
+class CompactClient:
+    compact_threshold_chars = 100
+    compact_chunk_chars = 4000
+    compact_max_items = 2
+    compact_max_output_tokens = 512
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.max_tokens = []
+
+    def chat_json(self, messages: list[dict[str, str]], *, max_tokens: int | None = None) -> dict:
+        self.calls += 1
+        self.max_tokens.append(max_tokens)
+        return {
+            "project_info": {
+                "project_name": "紧凑模式测试项目",
+                "purchaser": "测试采购人",
+            },
+            "mandatory_requirements": ["投标人必须提交营业执照。"],
+            "scoring_items": ["技术方案评分 20 分。"],
+            "qualification_requirements": ["项目经理应具备相关资质。"],
+            "required_documents": ["须提供营业执照复印件。"],
+            "deadlines": ["投标截止时间为 2026 年 9 月 1 日。"],
+            "risks": ["未提交材料将被否决。"],
+        }
+
+
+def test_large_document_uses_compact_llm_protocol() -> None:
+    text = "项目名称：紧凑模式测试项目\n" + "投标人必须提交营业执照。\n" + "甲" * 120
+    document = ParsedDocument(
+        filename="compact.pdf",
+        file_type="pdf",
+        pages=[ParsedPage(page_number=1, text=text)],
+        full_text=text,
+        char_count=len(text),
+    )
+    client = CompactClient()
+
+    analysis = analyze_document(document, client, use_llm=True)
+
+    assert client.calls == 1
+    assert client.max_tokens == [512]
+    assert analysis.analysis_mode == "llm_compact"
+    assert analysis.project_info.project_name == "紧凑模式测试项目"
+    assert analysis.mandatory_requirements[0].source_page == 1
+    assert analysis.scoring_items[0].points == "20"
+
+
+class AlwaysFailCompactClient(CompactClient):
+    def chat_json(self, messages: list[dict[str, str]], *, max_tokens: int | None = None) -> dict:
+        raise LLMError("模拟模型失败")
+
+
+def test_large_document_falls_back_to_rules_when_all_compact_calls_fail() -> None:
+    text = "项目名称：规则回退测试项目\n投标人必须提交营业执照。\n" + "甲" * 120
+    document = ParsedDocument(
+        filename="compact-fallback.pdf",
+        file_type="pdf",
+        pages=[ParsedPage(page_number=1, text=text)],
+        full_text=text,
+        char_count=len(text),
+    )
+
+    analysis = analyze_document(document, AlwaysFailCompactClient(), use_llm=True)
+
+    assert analysis.analysis_mode == "llm_compact"
+    assert analysis.project_info.project_name == "规则回退测试项目"
+    assert analysis.mandatory_requirements
+    assert any("规则模式补全" in warning for warning in analysis.warnings)

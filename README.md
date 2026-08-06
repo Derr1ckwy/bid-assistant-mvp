@@ -73,6 +73,10 @@ LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=qwen3:4b
 LLM_CHUNK_CHARS=12000
 LLM_MAX_CHUNKS=12
+LLM_COMPACT_THRESHOLD_CHARS=60000
+LLM_COMPACT_CHUNK_CHARS=8000
+LLM_COMPACT_MAX_ITEMS=2
+LLM_COMPACT_MAX_OUTPUT_TOKENS=512
 ```
 
 当前电脑已采用 Windows 原生 `llama.cpp` Vulkan 后端，不依赖 Ollama、Docker 或 WSL。首次重建环境时执行：
@@ -87,6 +91,8 @@ LLM_MAX_CHUNKS=12
 `run.ps1` 会优先自动启动本地 `llama-server`，继续使用 `http://localhost:11434/v1`、模型别名 `qwen3:4b` 和本地 API Key `ollama`；服务只监听本机地址并限制浏览器来源。本地文件不存在时才尝试已有 Ollama。可用 `.\stop_local_llm.ps1` 停止由项目管理的模型进程。也可以改用任意 OpenAI 兼容云端接口；API Key 仅保存在被 Git 忽略的 `.env` 中，不进入项目备份。
 
 模型健康检查会区分服务未启动、连接超时、鉴权失败、模型未下载和接口响应异常。选择 LLM 分析或生成时，若预检失败会立即切换到规则模式，不再等待完整请求超时。
+
+当招标文件超过 6 万字符时，分析会自动使用长文档精简模式：每段约 8,000 字符，每类最多提取 2 条高价值候选，并限制模型输出长度。这样可以避免本地 4B 模型因一次生成过长 JSON 而超时或截断；规则基线会继续补充完整条目，最终仍需人工确认。
 
 ## 项目备份
 

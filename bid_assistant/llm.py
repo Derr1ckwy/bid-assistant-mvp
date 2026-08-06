@@ -42,6 +42,10 @@ class OpenAICompatibleClient:
         self.timeout = settings.llm_timeout_seconds
         self.chunk_chars = settings.llm_chunk_chars
         self.max_chunks = settings.llm_max_chunks
+        self.compact_threshold_chars = settings.llm_compact_threshold_chars
+        self.compact_chunk_chars = settings.llm_compact_chunk_chars
+        self.compact_max_items = settings.llm_compact_max_items
+        self.compact_max_output_tokens = settings.llm_compact_max_output_tokens
 
     @property
     def headers(self) -> dict[str, str]:
@@ -107,7 +111,13 @@ class OpenAICompatibleClient:
     def is_available(self) -> bool:
         return self.check_health().available
 
-    def chat(self, messages: list[dict[str, str]], *, json_mode: bool = False) -> str:
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> str:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -115,6 +125,8 @@ class OpenAICompatibleClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if max_tokens is not None and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
@@ -152,5 +164,10 @@ class OpenAICompatibleClient:
         except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
             raise LLMError(f"模型响应格式异常：{type(exc).__name__}。") from exc
 
-    def chat_json(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        return extract_json_object(self.chat(messages, json_mode=True))
+    def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        return extract_json_object(self.chat(messages, json_mode=True, max_tokens=max_tokens))

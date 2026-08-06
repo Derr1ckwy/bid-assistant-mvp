@@ -282,6 +282,20 @@ risks: 数组，格式同 mandatory_requirements
 """
 
 
+def _compact_analysis_prompt(text: str, chunk_index: int, chunk_total: int, max_items: int) -> str:
+    return f"""You are a Chinese tender extraction assistant. Return ONLY one valid JSON object, no markdown.
+
+Use exactly these top-level keys: project_info, mandatory_requirements, scoring_items, qualification_requirements, required_documents, deadlines, risks.
+project_info is an object with project_name, purchaser, agency, budget, bid_deadline as short strings.
+Every other value is an array of at most {max_items} important short strings, each no more than 40 Chinese characters.
+Use empty strings or arrays when absent. Do not repeat facts or explain your work. Extract only facts present in this segment.
+This is segment {chunk_index}/{chunk_total}.
+
+Segment text:
+{text}
+"""
+
+
 def _normalize_confidence(value: Any) -> float:
     if isinstance(value, str):
         labels = {"高": 0.9, "中": 0.7, "低": 0.5}
@@ -336,6 +350,75 @@ def _normalize_llm_payload(payload: dict[str, Any]) -> dict[str, Any]:
             clean_items.append(item)
         normalized[group_name] = clean_items
     return normalized
+
+
+def _compact_values(value: Any, *, scoring: bool = False) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    values: list[str] = []
+    for raw in value:
+        if isinstance(raw, str):
+            text = raw.strip()
+        elif isinstance(raw, dict):
+            key = "criterion" if scoring else "content"
+            text = str(raw.get(key) or raw.get("source_quote") or "").strip()
+        else:
+            text = str(raw).strip()
+        if text and text not in values:
+            values.append(text[:200])
+    return values
+
+
+def _compact_page(text: str) -> int | None:
+    match = re.search(r"\[第\s*(\d+)\s*页(?:续)?\]", text)
+    return int(match.group(1)) if match else None
+
+
+def _compact_to_analysis(payload: dict[str, Any], text: str) -> TenderAnalysis:
+    raw_info = payload.get("project_info")
+    info = raw_info if isinstance(raw_info, dict) else {}
+    page = _compact_page(text)
+    base = {"source_page": page, "confidence": 0.55, "status": "待确认"}
+
+    def requirements(key: str, category: str) -> list[RequirementItem]:
+        return [
+            RequirementItem(content=value, category=category, source_quote=value, **base)
+            for value in _compact_values(payload.get(key))
+        ]
+
+    scoring_items: list[ScoringItem] = []
+    for value in _compact_values(payload.get("scoring_items"), scoring=True):
+        points = re.search(r"(\d+(?:\.\d+)?)\s*分", value)
+        scoring_items.append(
+            ScoringItem(
+                criterion=value,
+                points=points.group(1) if points else "",
+                response_hint="围绕评分依据逐条提供响应内容和证明材料。",
+                source_page=page,
+                source_quote=value,
+                confidence=0.55,
+                status="待确认",
+            )
+        )
+
+    analysis = TenderAnalysis(
+        project_info=ProjectInfo(
+            project_name=str(info.get("project_name") or ""),
+            purchaser=str(info.get("purchaser") or ""),
+            agency=str(info.get("agency") or ""),
+            budget=str(info.get("budget") or ""),
+            bid_deadline=str(info.get("bid_deadline") or ""),
+        ),
+        mandatory_requirements=requirements("mandatory_requirements", "强制要求"),
+        scoring_items=scoring_items,
+        qualification_requirements=requirements("qualification_requirements", "资格要求"),
+        required_documents=requirements("required_documents", "所需材料"),
+        deadlines=requirements("deadlines", "时间节点"),
+        risks=requirements("risks", "废标风险"),
+        analysis_mode="llm_compact",
+    )
+    analysis.outline = build_outline(analysis)
+    return analysis
 
 
 def _merge_project_info(items: list[ProjectInfo]) -> ProjectInfo:
@@ -405,24 +488,55 @@ def analyze_document(
     try:
         chunk_chars = max(4000, getattr(client, "chunk_chars", LLM_CHUNK_CHARS))
         max_chunks = max(1, getattr(client, "max_chunks", LLM_MAX_CHUNKS))
+        compact_threshold = getattr(client, "compact_threshold_chars", None)
+        compact_mode = compact_threshold is not None and document.char_count >= compact_threshold
+        if compact_mode:
+            chunk_chars = max(
+                4000,
+                min(chunk_chars, getattr(client, "compact_chunk_chars", 7500)),
+            )
         all_chunks = _document_chunks(document, max_chars=chunk_chars)
         if not all_chunks:
             fallback = analyze_with_rules(document)
             fallback.warnings.append("没有可提交给 LLM 的文本，已使用规则模式。")
             return fallback
 
+        if compact_mode:
+            max_chunks = min(max_chunks, 20)
         chunks = all_chunks[:max_chunks]
         partial_analyses: list[TenderAnalysis] = []
         failed_chunks: list[str] = []
         for index, text in enumerate(chunks, start=1):
             try:
-                payload = client.chat_json(
-                    [{"role": "user", "content": _analysis_prompt(text, index, len(chunks))}]
-                )
-                partial_analyses.append(TenderAnalysis.model_validate(_normalize_llm_payload(payload)))
+                if compact_mode:
+                    payload = client.chat_json(
+                        [
+                            {
+                                "role": "user",
+                                "content": _compact_analysis_prompt(
+                                    text,
+                                    index,
+                                    len(chunks),
+                                    max(1, getattr(client, "compact_max_items", 3)),
+                                ),
+                            }
+                        ],
+                        max_tokens=max(
+                            128,
+                            getattr(client, "compact_max_output_tokens", 512),
+                        ),
+                    )
+                    partial_analyses.append(_compact_to_analysis(payload, text))
+                else:
+                    payload = client.chat_json(
+                        [{"role": "user", "content": _analysis_prompt(text, index, len(chunks))}]
+                    )
+                    partial_analyses.append(TenderAnalysis.model_validate(_normalize_llm_payload(payload)))
             except (LLMError, ValidationError, TypeError, ValueError) as exc:
                 failed_chunks.append(f"第 {index} 段失败：{exc}")
 
+        if not partial_analyses and compact_mode and failed_chunks:
+            partial_analyses.append(analyze_with_rules(document))
         if not partial_analyses:
             raise LLMError("；".join(failed_chunks) or "全部文档分段均分析失败。")
 
@@ -435,8 +549,19 @@ def analyze_document(
                 f"文档共 {len(all_chunks)} 个分析分段，本次只处理前 {max_chunks} 段，请人工检查后续内容。"
             )
         if failed_chunks:
-            warnings.append("部分 LLM 分段失败，已保留成功结果：" + "；".join(failed_chunks))
+            if compact_mode:
+                warnings.append(
+                    f"LLM 精简提取有 {len(failed_chunks)} 段未返回完整结果，已自动使用规则模式补全，请人工确认。"
+                )
+            else:
+                warnings.append("部分 LLM 分段失败，已保留成功结果：" + "；".join(failed_chunks))
+            # Keep a complete rule-based baseline when a local model times out or
+            # returns truncated JSON for a large document.
+            partial_analyses.append(analyze_with_rules(document))
 
+        if compact_mode:
+            mode = "llm_compact"
+            warnings.append("文档较长，已使用精简 LLM 提取并限制每类候选数量；完整性以人工确认和规则基线为准。")
         analysis = _merge_llm_analyses(partial_analyses, warnings, mode)
         _validate_source_quotes(analysis, document)
         return analysis
