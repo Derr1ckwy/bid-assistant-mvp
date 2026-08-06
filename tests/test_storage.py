@@ -120,6 +120,28 @@ def test_existing_database_is_migrated_for_archiving(tmp_path: Path) -> None:
     store = ProjectStore(data_dir)
 
     assert store.get_project("proj_old")["archived"] == 0
+    assert store.get_project("proj_old")["owner_id"] is None
+
+
+def test_projects_are_filtered_and_unowned_projects_can_be_claimed(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    first = store.create_project("甲账号项目", owner_id="user_a")
+    second = store.create_project("乙账号项目", owner_id="user_b")
+    legacy = store.create_project("历史项目")
+
+    assert [item["id"] for item in store.list_projects(owner_id="user_a")] == [first["id"]]
+    assert [item["id"] for item in store.list_projects(owner_id="user_b")] == [second["id"]]
+    assert store.assign_unowned_projects("admin_user") == 1
+    assert store.get_project(legacy["id"])["owner_id"] == "admin_user"
+
+    store.assign_project_owner(second["id"], "user_a")
+    assert {item["id"] for item in store.list_projects(owner_id="user_a")} == {
+        first["id"],
+        second["id"],
+    }
+
+    with pytest.raises(KeyError):
+        store.assign_project_owner("proj_missing", "user_a")
 
 
 def test_archive_and_restore_project(tmp_path: Path) -> None:
@@ -204,6 +226,17 @@ def test_duplicate_project_copies_business_data_without_outputs_or_versions(tmp_
     assert store.list_draft_versions(duplicate["id"]) == []
     assert store.list_export_versions(duplicate["id"]) == []
     assert store.list_package_versions(duplicate["id"]) == []
+
+
+def test_duplicate_project_preserves_or_overrides_owner(tmp_path: Path) -> None:
+    store = ProjectStore(tmp_path / "data")
+    source = store.create_project("原项目", owner_id="user_a")
+
+    preserved = store.duplicate_project(source["id"])
+    overridden = store.duplicate_project(source["id"], owner_id="user_b")
+
+    assert preserved["owner_id"] == "user_a"
+    assert overridden["owner_id"] == "user_b"
 
 
 def test_draft_versions_can_be_listed_and_restored(tmp_path: Path) -> None:
@@ -550,6 +583,24 @@ def test_project_archive_round_trip_and_id_conflict(tmp_path: Path) -> None:
     duplicate = target_store.import_project_archive(backup)
     assert duplicate["id"] != source["id"]
     assert duplicate["name"] == "迁移项目"
+
+
+def test_project_archive_excludes_identity_and_import_uses_current_owner(tmp_path: Path) -> None:
+    source_store = ProjectStore(tmp_path / "source")
+    source = source_store.create_project("隐私备份测试", owner_id="source_user")
+    source_store.save_json(source["id"], "analysis", {"ok": True})
+
+    backup = source_store.export_project_archive(source["id"])
+    with zipfile.ZipFile(io.BytesIO(backup), "r") as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        archived_paths = archive.namelist()
+
+    assert "owner_id" not in manifest["project"]
+    assert all("auth.db" not in path and "security/" not in path for path in archived_paths)
+
+    target_store = ProjectStore(tmp_path / "target")
+    imported = target_store.import_project_archive(backup, owner_id="importing_user")
+    assert imported["owner_id"] == "importing_user"
 
 
 def test_project_archive_rejects_path_traversal(tmp_path: Path) -> None:

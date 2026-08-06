@@ -38,6 +38,7 @@ class Settings:
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
     embedding_timeout_seconds: int = int(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "120"))
     vector_min_files: int = int(os.getenv("VECTOR_MIN_FILES", "40"))
+    auth_session_timeout_minutes: int = int(os.getenv("AUTH_SESSION_TIMEOUT_MINUTES", "30"))
 
 
 def save_llm_settings(value: Settings) -> Path:

@@ -37,6 +37,53 @@ def test_rule_analysis_extracts_key_items() -> None:
     assert len(analysis.outline) == 6
 
 
+def test_rule_analysis_uses_real_project_name_and_joins_wrapped_agency() -> None:
+    text = """萧县2025年农村公路提质改造联网路工程
+（项目编号：EP-XXGC2025024）
+招标文件
+招 标 人：萧县交通运输局（盖单位章）
+招标代理机构：华兴天成项目咨询有限公司（电子签
+章）
+项目名称：见投标人须知前附表
+本招标项目萧县2025年农村公路提质改造联网路工程（项目名称）已批准建设。
+2.7招标控制价：2667808.12元
+投标文件提交网址的截止时间（投标截止时间，下同）为 2025年5月29日09时00分。
+"""
+    document = ParsedDocument(
+        filename="real-layout.pdf",
+        file_type="pdf",
+        pages=[ParsedPage(page_number=1, text=text)],
+        full_text=text,
+        char_count=len(text),
+    )
+
+    analysis = analyze_document(document)
+
+    assert analysis.project_info.project_name == "萧县2025年农村公路提质改造联网路工程"
+    assert analysis.project_info.purchaser == "萧县交通运输局（盖单位章）"
+    assert analysis.project_info.agency == "华兴天成项目咨询有限公司（电子签章）"
+    assert analysis.project_info.budget == "2667808.12元"
+    assert analysis.project_info.bid_deadline.startswith("2025年5月29日09时00分")
+
+
+def test_rule_analysis_does_not_apply_chinese_cover_guess_to_foreign_document() -> None:
+    text = """入 札 公 告
+次のとおり一般競争入札に付します。
+② 導入計画書（契約締結後から業務開始までの作業工程等）
+"""
+    document = ParsedDocument(
+        filename="foreign-tender.pdf",
+        file_type="pdf",
+        pages=[ParsedPage(page_number=1, text=text)],
+        full_text=text,
+        char_count=len(text),
+    )
+
+    analysis = analyze_document(document)
+
+    assert analysis.project_info.project_name == ""
+
+
 class FakeChunkClient:
     def __init__(self) -> None:
         self.calls = 0

@@ -54,19 +54,77 @@ def _dedupe_requirements(items: list[RequirementItem], limit: int = 80) -> list[
 
 
 def _extract_project_info(text: str) -> ProjectInfo:
-    def match(patterns: list[str]) -> str:
-        for pattern in patterns:
-            found = re.search(pattern, text, flags=re.IGNORECASE)
-            if found:
-                return _clean_line(found.group(1))[:200]
+    lines = [_clean_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line and not re.fullmatch(r"\[第 \d+ 页]", line)]
+
+    def labeled_values(label_pattern: str, *, allow_parenthetical: bool = False) -> list[str]:
+        separator = (
+            r"\s*(?:[（(][^）)\n]{0,35}[）)])?\s*(?:[：:]|为)"
+            if allow_parenthetical
+            else r"\s*[：:]"
+        )
+        pattern = re.compile(rf"(?:{label_pattern}){separator}\s*(.+)$", flags=re.IGNORECASE)
+        values: list[str] = []
+        for index, line in enumerate(lines):
+            found = pattern.search(line)
+            if not found:
+                continue
+            value = _clean_line(found.group(1))
+            if (
+                index + 1 < len(lines)
+                and len(lines[index + 1]) <= 16
+                and not re.search(r"[：:]", lines[index + 1])
+                and value.count("（") + value.count("(") > value.count("）") + value.count(")")
+            ):
+                value += lines[index + 1]
+            if value:
+                values.append(value[:200])
+        return values
+
+    def first_usable(values: list[str], *, reject_placeholders: bool = False) -> str:
+        for value in values:
+            if reject_placeholders and re.search(r"见.{0,12}(?:前附表|须知|下表)|详见|待填|填写", value):
+                continue
+            return value
         return ""
 
+    project_candidates = labeled_values(r"项目名称|采购项目(?:名称)?|招标项目名称")
+    project_name = first_usable(project_candidates, reject_placeholders=True)
+    if not project_name:
+        embedded = re.search(
+            r"(?:本招标项目|本采购项目|本项目)\s*([^\n（(]{4,120})\s*[（(]项目名称[）)]",
+            text,
+        )
+        if embedded:
+            project_name = _clean_line(embedded.group(1))[:200]
+    if not project_name:
+        cover_marker_index = None
+        for index, line in enumerate(lines[:30]):
+            compact = re.sub(r"\s+", "", line)
+            if compact in {"招标文件", "采购文件", "竞争性磋商文件", "询价文件"}:
+                cover_marker_index = index
+                break
+        if cover_marker_index is not None:
+            for line in lines[:cover_marker_index]:
+                candidate = re.sub(r"^\d+\s+(?=[\u4e00-\u9fff])", "", line).strip()
+                if (
+                    4 <= len(candidate) <= 120
+                    and any(word in candidate for word in ("项目", "工程", "采购", "服务"))
+                    and not any(word in candidate for word in ("项目编号", "招标文件", "采购文件"))
+                ):
+                    project_name = candidate
+                    break
+
+    deadline_values = labeled_values(
+        r"投标截止时间|递交截止时间|响应文件提交截止时间|投标文件提交(?:网址)?的截止时间",
+        allow_parenthetical=True,
+    )
     return ProjectInfo(
-        project_name=match([r"项目名称\s*[：:]\s*([^\n]{2,120})", r"采购项目\s*[：:]\s*([^\n]{2,120})"]),
-        purchaser=match([r"(?:采购人|招标人|招标单位)\s*[：:]\s*([^\n]{2,120})"]),
-        agency=match([r"(?:代理机构|采购代理机构)\s*[：:]\s*([^\n]{2,120})"]),
-        budget=match([r"(?:预算金额|最高限价|采购预算)\s*[：:]\s*([^\n]{2,80})"]),
-        bid_deadline=match([r"(?:投标截止时间|递交截止时间|响应文件提交截止时间)\s*[：:]\s*([^\n]{2,100})"]),
+        project_name=project_name,
+        purchaser=first_usable(labeled_values(r"采购人|招\s*标\s*人|招标单位")),
+        agency=first_usable(labeled_values(r"采购代理机构|招标代理机构|代理机构")),
+        budget=first_usable(labeled_values(r"预算金额|最高投标限价|最高限价|采购预算|招标控制价")),
+        bid_deadline=first_usable(deadline_values),
     )
 
 

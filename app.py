@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import mimetypes
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +13,7 @@ import streamlit as st
 
 from bid_assistant.acceptance import build_acceptance_report, build_analysis_acceptance
 from bid_assistant.analyzer import analyze_document
+from bid_assistant.auth import UserStore
 from bid_assistant.config import Settings, save_llm_settings, settings
 from bid_assistant.docx_quality import build_docx_quality_report, verify_docx_output
 from bid_assistant.exporter import build_draft_docx, export_docx
@@ -103,6 +106,11 @@ def get_store() -> ProjectStore:
 
 
 @st.cache_resource
+def get_user_store() -> UserStore:
+    return UserStore(settings.data_dir / "security" / "auth.db")
+
+
+@st.cache_resource
 def get_llm_client(runtime_settings: Settings) -> OpenAICompatibleClient:
     return OpenAICompatibleClient(runtime_settings)
 
@@ -141,6 +149,310 @@ def _display_chinese_table(rows: list[dict], columns: list[tuple[str, str]]) -> 
     )
 
 
+def _start_authenticated_session(user: dict) -> None:
+    st.session_state["auth_user_id"] = user["id"]
+    st.session_state["auth_last_activity"] = datetime.now(timezone.utc).isoformat()
+
+
+def _clear_authenticated_session(notice: str = "") -> None:
+    st.session_state.clear()
+    if notice:
+        st.session_state["auth_notice"] = notice
+
+
+def _render_first_admin_setup(auth_store: UserStore, store: ProjectStore) -> None:
+    st.title("初始化管理员账号")
+    st.info("首次启用账号保护。账号密码只保存为本机加盐哈希，不会进入项目备份或 Git。")
+    with st.form("first_admin_setup"):
+        username = st.text_input("管理员用户名", value="admin", help="使用 3-32 位字母、数字、点、短横线或下划线。")
+        display_name = st.text_input("显示名称", value="系统管理员")
+        password = st.text_input("管理员密码", type="password")
+        confirmation = st.text_input("再次输入密码", type="password")
+        submitted = st.form_submit_button("创建管理员并启用登录保护", type="primary")
+    if submitted:
+        if password != confirmation:
+            st.error("两次输入的密码不一致。")
+            return
+        try:
+            user = auth_store.create_user(username, display_name, password, role="admin")
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        claimed = store.assign_unowned_projects(user["id"])
+        auth_store.record_event(
+            "legacy_projects_claimed",
+            actor=user,
+            detail={"project_count": claimed},
+        )
+        _start_authenticated_session(user)
+        st.rerun()
+
+
+def _render_login(auth_store: UserStore) -> None:
+    st.title("投标初稿助手")
+    st.subheader("账号登录")
+    notice = st.session_state.pop("auth_notice", None)
+    if notice:
+        st.warning(notice)
+    with st.form("login_form"):
+        username = st.text_input("用户名")
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录", type="primary")
+    st.caption("连续 5 次密码错误将锁定账号 10 分钟。关闭或刷新浏览器后可能需要重新登录。")
+    if submitted:
+        result = auth_store.authenticate(username, password)
+        if result["ok"]:
+            _start_authenticated_session(result["user"])
+            st.rerun()
+        st.error(result["message"])
+
+
+def _authenticated_user(auth_store: UserStore) -> dict | None:
+    user_id = st.session_state.get("auth_user_id")
+    if not user_id:
+        return None
+    user = auth_store.get_user(str(user_id))
+    if not user or not user["active"]:
+        _clear_authenticated_session("账号不存在或已被管理员停用，请重新登录。")
+        return None
+
+    now = datetime.now(timezone.utc)
+    last_activity = st.session_state.get("auth_last_activity")
+    if last_activity:
+        try:
+            idle_seconds = (now - datetime.fromisoformat(str(last_activity))).total_seconds()
+        except ValueError:
+            idle_seconds = 0
+        if idle_seconds > settings.auth_session_timeout_minutes * 60:
+            auth_store.record_event("session_timeout", actor=user)
+            _clear_authenticated_session(
+                f"会话已闲置超过 {settings.auth_session_timeout_minutes} 分钟，请重新登录。"
+            )
+            return None
+    st.session_state["auth_last_activity"] = now.isoformat()
+    return user
+
+
+def _render_forced_password_change(auth_store: UserStore, user: dict) -> None:
+    st.title("修改临时密码")
+    st.warning("管理员已重置该账号密码。继续使用前必须设置只有你本人知道的新密码。")
+    with st.form("forced_password_change"):
+        current_password = st.text_input("当前临时密码", type="password")
+        new_password = st.text_input("新密码", type="password")
+        confirmation = st.text_input("再次输入新密码", type="password")
+        submitted = st.form_submit_button("保存新密码", type="primary")
+    if submitted:
+        if new_password != confirmation:
+            st.error("两次输入的新密码不一致。")
+            return
+        try:
+            auth_store.change_password(user["id"], current_password, new_password)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        st.success("密码已修改，请继续使用系统。")
+        st.rerun()
+
+
+def _render_account_security(auth_store: UserStore, user: dict) -> None:
+    role_label = "管理员" if user["role"] == "admin" else "普通账号"
+    with st.sidebar.expander("账号与安全", expanded=False):
+        st.write(f"{user['display_name']}（{role_label}）")
+        st.caption(f"用户名：{user['username']}")
+        with st.form("sidebar_password_change", clear_on_submit=True):
+            current_password = st.text_input("当前密码", type="password", key="self_current_password")
+            new_password = st.text_input("新密码", type="password", key="self_new_password")
+            confirmation = st.text_input("确认新密码", type="password", key="self_confirm_password")
+            change_password = st.form_submit_button("修改密码", width="stretch")
+        if change_password:
+            if new_password != confirmation:
+                st.error("两次输入的新密码不一致。")
+            else:
+                try:
+                    auth_store.change_password(user["id"], current_password, new_password)
+                    st.success("密码已修改。")
+                except ValueError as exc:
+                    st.error(str(exc))
+        if st.button("退出登录", width="stretch", key="logout"):
+            auth_store.record_event("logout", actor=user)
+            _clear_authenticated_session("已安全退出登录。")
+            st.rerun()
+
+
+def _render_account_management(auth_store: UserStore, store: ProjectStore, current_user: dict) -> None:
+    st.title("账号与项目权限")
+    st.caption("账号权限用于隔离系统内项目，不替代 Windows 磁盘权限、BitLocker 或服务器访问控制。")
+    users = auth_store.list_users()
+    user_by_id = {item["id"]: item for item in users}
+    all_projects = store.list_projects(include_archived=True)
+    metrics = st.columns(4)
+    metrics[0].metric("账号总数", len(users))
+    metrics[1].metric("有效账号", sum(bool(item["active"]) for item in users))
+    metrics[2].metric("管理员", sum(item["role"] == "admin" and item["active"] for item in users))
+    metrics[3].metric("项目总数", len(all_projects))
+
+    st.subheader("新建账号")
+    with st.form("create_account_form", clear_on_submit=True):
+        columns = st.columns(2)
+        username = columns[0].text_input("用户名", help="创建后不能修改。")
+        display_name = columns[1].text_input("显示名称")
+        role_label = columns[0].selectbox("角色", ["普通账号", "管理员"])
+        initial_password = columns[1].text_input("临时密码", type="password")
+        confirmation = columns[1].text_input("确认临时密码", type="password")
+        create_account = st.form_submit_button("创建账号", type="primary")
+    if create_account:
+        if initial_password != confirmation:
+            st.error("两次输入的临时密码不一致。")
+        else:
+            try:
+                auth_store.create_user(
+                    username,
+                    display_name,
+                    initial_password,
+                    role="admin" if role_label == "管理员" else "user",
+                    must_change_password=True,
+                    actor=current_user,
+                )
+                st.success("账号已创建，首次登录时必须修改临时密码。")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+    st.subheader("账号列表")
+    _display_chinese_table(
+        [
+            {
+                "username": item["username"],
+                "display_name": item["display_name"],
+                "role": "管理员" if item["role"] == "admin" else "普通账号",
+                "active": "有效" if item["active"] else "已停用",
+                "must_change": "是" if item["must_change_password"] else "否",
+                "last_login": format_beijing_time(item["last_login_at"]) if item["last_login_at"] else "从未登录",
+            }
+            for item in users
+        ],
+        [
+            ("username", "用户名"),
+            ("display_name", "显示名称"),
+            ("role", "角色"),
+            ("active", "状态"),
+            ("must_change", "需改密码"),
+            ("last_login", "最近登录"),
+        ],
+    )
+
+    selected_user_id = st.selectbox(
+        "选择管理账号",
+        options=list(user_by_id),
+        format_func=lambda user_id: f"{user_by_id[user_id]['display_name']}（{user_by_id[user_id]['username']}）",
+        key="managed_user_id",
+    )
+    selected_user = user_by_id[selected_user_id]
+    action_columns = st.columns([1, 2])
+    active_label = "停用账号" if selected_user["active"] else "启用账号"
+    if action_columns[0].button(
+        active_label,
+        disabled=selected_user_id == current_user["id"],
+        width="stretch",
+        key=f"toggle_user_{selected_user_id}",
+    ):
+        try:
+            auth_store.set_active(selected_user_id, not bool(selected_user["active"]), actor=current_user)
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+
+    if selected_user_id != current_user["id"]:
+        with st.form(f"reset_password_{selected_user_id}", clear_on_submit=True):
+            reset_password = st.text_input("新的临时密码", type="password")
+            reset_confirmation = st.text_input("确认新的临时密码", type="password")
+            reset_submitted = st.form_submit_button("重置所选账号密码")
+        if reset_submitted:
+            if reset_password != reset_confirmation:
+                st.error("两次输入的临时密码不一致。")
+            else:
+                try:
+                    auth_store.reset_password(selected_user_id, reset_password, actor=current_user)
+                    st.success("密码已重置，该账号下次登录时必须修改密码。")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+
+    st.subheader("项目归属")
+    if all_projects:
+        _display_chinese_table(
+            [
+                {
+                    "name": item["name"],
+                    "owner": user_by_id.get(item.get("owner_id"), {}).get("display_name", "未分配"),
+                    "status": "已归档" if item["archived"] else "使用中",
+                    "updated": format_beijing_time(item["updated_at"]),
+                }
+                for item in all_projects
+            ],
+            [("name", "项目"), ("owner", "所属账号"), ("status", "状态"), ("updated", "更新时间")],
+        )
+        project_by_id = {item["id"]: item for item in all_projects}
+        active_users = {item["id"]: item for item in users if item["active"]}
+        with st.form("transfer_project_form"):
+            transfer_project_id = st.selectbox(
+                "选择项目",
+                options=list(project_by_id),
+                format_func=lambda project_id: project_by_id[project_id]["name"],
+            )
+            target_owner_id = st.selectbox(
+                "转移给",
+                options=list(active_users),
+                format_func=lambda user_id: f"{active_users[user_id]['display_name']}（{active_users[user_id]['username']}）",
+            )
+            transfer_submitted = st.form_submit_button("确认转移项目")
+        if transfer_submitted:
+            store.assign_project_owner(transfer_project_id, target_owner_id)
+            auth_store.record_event(
+                "project_transferred",
+                actor=current_user,
+                detail={
+                    "project_id": transfer_project_id,
+                    "project_name": project_by_id[transfer_project_id]["name"],
+                    "target_user_id": target_owner_id,
+                    "target_username": active_users[target_owner_id]["username"],
+                },
+            )
+            if st.session_state.get("project_id") == transfer_project_id:
+                st.session_state.pop("project_id", None)
+            st.success("项目归属已更新。")
+            st.rerun()
+    else:
+        st.info("当前还没有项目。")
+
+    with st.expander("安全审计记录", expanded=False):
+        event_labels = {
+            "user_created": "创建账号",
+            "user_enabled": "启用账号",
+            "user_disabled": "停用账号",
+            "password_reset": "重置密码",
+            "password_changed": "修改密码",
+            "login_success": "登录成功",
+            "login_failed": "登录失败",
+            "login_locked": "锁定期间登录",
+            "login_disabled": "停用账号登录",
+            "logout": "退出登录",
+            "session_timeout": "会话超时",
+            "project_transferred": "转移项目",
+            "legacy_projects_claimed": "接管历史项目",
+        }
+        _display_chinese_table(
+            [
+                {
+                    "created_at": format_beijing_time(item["created_at"]),
+                    "username": item["username"],
+                    "event": event_labels.get(item["event"], item["event"]),
+                    "detail": json.dumps(item["detail"], ensure_ascii=False) if item["detail"] else "-",
+                }
+                for item in auth_store.list_audit_events(100)
+            ],
+            [("created_at", "时间"), ("username", "账号"), ("event", "事件"), ("detail", "明细")],
+        )
 def _requirement_rows(items: list[RequirementItem]) -> list[dict]:
     return [
         {
@@ -307,6 +619,30 @@ def _docx_file_signature(path: Path) -> tuple[int, int]:
     return stat.st_size, stat.st_mtime_ns
 
 
+store = get_store()
+auth_store = get_user_store()
+
+if not auth_store.has_users():
+    _render_first_admin_setup(auth_store, store)
+    st.stop()
+
+current_user = _authenticated_user(auth_store)
+if current_user is None:
+    _render_login(auth_store)
+    st.stop()
+if current_user["must_change_password"]:
+    _render_forced_password_change(auth_store, current_user)
+    st.stop()
+
+is_admin = current_user["role"] == "admin"
+st.sidebar.title("投标初稿助手")
+_render_account_security(auth_store, current_user)
+workspace_options = ["投标项目", "账号管理"] if is_admin else ["投标项目"]
+workspace = st.sidebar.radio("工作区", workspace_options, horizontal=True, key="workspace_mode")
+if workspace == "账号管理":
+    _render_account_management(auth_store, store, current_user)
+    st.stop()
+
 runtime_settings = replace(
     settings,
     llm_base_url=str(st.session_state.get("llm_base_url_input", settings.llm_base_url)).rstrip("/"),
@@ -316,23 +652,28 @@ runtime_settings = replace(
     llm_chunk_chars=int(st.session_state.get("llm_chunk_chars_input", settings.llm_chunk_chars)),
     llm_max_chunks=int(st.session_state.get("llm_max_chunks_input", settings.llm_max_chunks)),
 )
-store = get_store()
 llm_client = get_llm_client(runtime_settings)
 
 st.sidebar.title("投标项目")
 new_name = st.sidebar.text_input("新项目名称", placeholder="例如：某某信息化项目")
 if st.sidebar.button("新建项目", type="primary", width="stretch"):
-    project = store.create_project(new_name)
+    project = store.create_project(new_name, owner_id=current_user["id"])
     st.session_state["project_id"] = project["id"]
     st.rerun()
 
 show_archived = st.sidebar.toggle("显示已归档项目", key="show_archived_projects")
-projects = store.list_projects(include_archived=show_archived)
+projects = store.list_projects(
+    include_archived=show_archived,
+    owner_id=None if is_admin else current_user["id"],
+)
 project_ids = [project["id"] for project in projects]
-project_names = {
-    project["id"]: f"{project['name']}（已归档）" if project["archived"] else project["name"]
-    for project in projects
-}
+owner_names = {item["id"]: item["display_name"] for item in auth_store.list_users()}
+project_names = {}
+for item in projects:
+    label = f"{item['name']}（已归档）" if item["archived"] else item["name"]
+    if is_admin:
+        label = f"{label} · {owner_names.get(item.get('owner_id'), '未分配')}"
+    project_names[item["id"]] = label
 current_id = st.session_state.get("project_id")
 if current_id not in project_ids:
     current_id = project_ids[0] if project_ids else None
@@ -356,7 +697,7 @@ with st.sidebar.expander("项目管理", expanded=False):
     )
     if st.button("导入备份", disabled=backup_upload is None, width="stretch"):
         try:
-            imported = store.import_project_archive(backup_upload.getvalue())
+            imported = store.import_project_archive(backup_upload.getvalue(), owner_id=current_user["id"])
             st.session_state["project_id"] = imported["id"]
             st.success(f"已导入：{imported['name']}")
             st.rerun()
@@ -384,7 +725,7 @@ with st.sidebar.expander("项目管理", expanded=False):
             key=f"duplicate_{current_id}",
             help="复制源文件、分析、知识资料、草稿和复核状态，不复制旧 Word 与版本历史。",
         ):
-            duplicate = store.duplicate_project(current_id)
+            duplicate = store.duplicate_project(current_id, owner_id=current_user["id"])
             st.session_state["project_id"] = duplicate["id"]
             st.session_state["project_flash"] = f"已创建项目副本：{duplicate['name']}"
             st.rerun()
@@ -396,49 +737,50 @@ with st.sidebar.expander("项目管理", expanded=False):
                 st.session_state.pop("project_id", None)
             st.rerun()
 
-with st.sidebar.expander("模型配置", expanded=False):
-    st.text_input("接口地址", value=settings.llm_base_url, key="llm_base_url_input")
-    st.text_input("模型名称", value=settings.llm_model, key="llm_model_input")
-    st.text_input("API Key", value=settings.llm_api_key, type="password", key="llm_api_key_input")
-    parameter_columns = st.columns(2)
-    parameter_columns[0].number_input(
-        "分段字符数",
-        min_value=4000,
-        max_value=40000,
-        step=1000,
-        value=settings.llm_chunk_chars,
-        key="llm_chunk_chars_input",
-    )
-    parameter_columns[1].number_input(
-        "最多分段",
-        min_value=1,
-        max_value=20,
-        step=1,
-        value=settings.llm_max_chunks,
-        key="llm_max_chunks_input",
-    )
-    st.number_input(
-        "请求超时（秒）",
-        min_value=30,
-        max_value=600,
-        step=30,
-        value=settings.llm_timeout_seconds,
-        key="llm_timeout_input",
-    )
-    action_columns = st.columns(2)
-    if action_columns[0].button("检测连接", width="stretch", key="check_llm_connection"):
-        health = llm_client.check_health()
-        if health.available:
-            st.success(health.message)
+if is_admin:
+    with st.sidebar.expander("模型配置", expanded=False):
+        st.text_input("接口地址", value=settings.llm_base_url, key="llm_base_url_input")
+        st.text_input("模型名称", value=settings.llm_model, key="llm_model_input")
+        st.text_input("API Key", value=settings.llm_api_key, type="password", key="llm_api_key_input")
+        parameter_columns = st.columns(2)
+        parameter_columns[0].number_input(
+            "分段字符数",
+            min_value=4000,
+            max_value=40000,
+            step=1000,
+            value=settings.llm_chunk_chars,
+            key="llm_chunk_chars_input",
+        )
+        parameter_columns[1].number_input(
+            "最多分段",
+            min_value=1,
+            max_value=20,
+            step=1,
+            value=settings.llm_max_chunks,
+            key="llm_max_chunks_input",
+        )
+        st.number_input(
+            "请求超时（秒）",
+            min_value=30,
+            max_value=600,
+            step=30,
+            value=settings.llm_timeout_seconds,
+            key="llm_timeout_input",
+        )
+        action_columns = st.columns(2)
+        if action_columns[0].button("检测连接", width="stretch", key="check_llm_connection"):
+            health = llm_client.check_health()
+            if health.available:
+                st.success(health.message)
+            else:
+                st.error(health.message)
+        if action_columns[1].button("保存配置", width="stretch", key="save_llm_configuration"):
+            save_llm_settings(runtime_settings)
+            st.success("模型配置已保存到本机 .env，当前会话立即生效。")
+        if "localhost:11434" in runtime_settings.llm_base_url:
+            st.caption(f"本地模式需要模型服务，并已配置模型：{runtime_settings.llm_model}")
         else:
-            st.error(health.message)
-    if action_columns[1].button("保存配置", width="stretch", key="save_llm_configuration"):
-        save_llm_settings(runtime_settings)
-        st.success("模型配置已保存到本机 .env，当前会话立即生效。")
-    if "localhost:11434" in runtime_settings.llm_base_url:
-        st.caption(f"本地模式需要 Ollama 服务，并已下载模型：{runtime_settings.llm_model}")
-    else:
-        st.caption("云端 API Key 仅保存在本机 .env，不进入 Git 或项目备份。")
+            st.caption("云端 API Key 仅保存在本机 .env，不进入 Git 或项目备份。")
 
 st.sidebar.caption("当前版本只生成可复核初稿，不替代投标负责人审核。")
 

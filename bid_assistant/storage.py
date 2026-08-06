@@ -123,6 +123,7 @@ class ProjectStore:
                     name TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'new',
                     source_filename TEXT,
+                    owner_id TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     archived INTEGER NOT NULL DEFAULT 0
@@ -132,6 +133,8 @@ class ProjectStore:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
             if "archived" not in columns:
                 conn.execute("ALTER TABLE projects ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+            if "owner_id" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT")
 
     def _project_exists(self, project_id: str) -> bool:
         with self._connect() as conn:
@@ -151,25 +154,57 @@ class ProjectStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def create_project(self, name: str) -> dict:
+    def create_project(self, name: str, *, owner_id: str | None = None) -> dict:
         project_id = self._new_project_id()
         timestamp = _now()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO projects (id, name, status, created_at, updated_at) VALUES (?, ?, 'new', ?, ?)",
-                (project_id, name.strip() or "未命名投标项目", timestamp, timestamp),
+                """
+                INSERT INTO projects (id, name, status, owner_id, created_at, updated_at)
+                VALUES (?, ?, 'new', ?, ?, ?)
+                """,
+                (project_id, name.strip() or "未命名投标项目", owner_id, timestamp, timestamp),
             )
         self.project_dir(project_id)
         return self.get_project(project_id)
 
-    def list_projects(self, *, include_archived: bool = False) -> list[dict]:
+    def list_projects(
+        self,
+        *,
+        include_archived: bool = False,
+        owner_id: str | None = None,
+    ) -> list[dict]:
         query = "SELECT * FROM projects"
+        conditions: list[str] = []
+        parameters: list[str] = []
         if not include_archived:
-            query += " WHERE archived=0"
+            conditions.append("archived=0")
+        if owner_id is not None:
+            conditions.append("owner_id=?")
+            parameters.append(owner_id)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY archived ASC, updated_at DESC"
         with self._connect() as conn:
-            rows = conn.execute(query).fetchall()
+            rows = conn.execute(query, parameters).fetchall()
         return [dict(row) for row in rows]
+
+    def assign_unowned_projects(self, owner_id: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE projects SET owner_id=?, updated_at=? WHERE owner_id IS NULL OR owner_id=''",
+                (owner_id, _now()),
+            )
+        return cursor.rowcount
+
+    def assign_project_owner(self, project_id: str, owner_id: str) -> None:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE projects SET owner_id=?, updated_at=? WHERE id=?",
+                (owner_id, _now(), project_id),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Project not found: {project_id}")
 
     def get_project(self, project_id: str) -> dict:
         with self._connect() as conn:
@@ -202,7 +237,13 @@ class ProjectStore:
         if cursor.rowcount == 0:
             raise KeyError(f"Project not found: {project_id}")
 
-    def duplicate_project(self, project_id: str, name: str | None = None) -> dict:
+    def duplicate_project(
+        self,
+        project_id: str,
+        name: str | None = None,
+        *,
+        owner_id: str | None = None,
+    ) -> dict:
         project = self.get_project(project_id)
         source = self.project_dir(project_id)
         new_id = self._new_project_id()
@@ -239,15 +280,24 @@ class ProjectStore:
             timestamp = _now()
             default_name = f"{project['name']}（副本）"
             duplicate_name = (name or default_name).strip()[:200] or default_name
+            duplicate_owner = owner_id if owner_id is not None else project.get("owner_id")
 
             with self._connect() as conn:
                 conn.execute(
                     """
                     INSERT INTO projects
-                        (id, name, status, source_filename, created_at, updated_at, archived)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                        (id, name, status, source_filename, owner_id, created_at, updated_at, archived)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                     """,
-                    (new_id, duplicate_name, status, source_filename, timestamp, timestamp),
+                    (
+                        new_id,
+                        duplicate_name,
+                        status,
+                        source_filename,
+                        duplicate_owner,
+                        timestamp,
+                        timestamp,
+                    ),
                 )
                 temporary.replace(target)
         except Exception:
@@ -898,7 +948,7 @@ class ProjectStore:
             raise ProjectArchiveError("压缩后的项目备份超过上传上限（100 MB）")
         return result
 
-    def import_project_archive(self, content: bytes) -> dict:
+    def import_project_archive(self, content: bytes, *, owner_id: str | None = None) -> dict:
         if not content:
             raise ProjectArchiveError("备份文件为空")
         if len(content) > MAX_ARCHIVE_BYTES:
@@ -1026,10 +1076,18 @@ class ProjectStore:
                     conn.execute(
                         """
                         INSERT INTO projects
-                            (id, name, status, source_filename, created_at, updated_at, archived)
-                        VALUES (?, ?, ?, ?, ?, ?, 0)
+                            (id, name, status, source_filename, owner_id, created_at, updated_at, archived)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0)
                         """,
-                        (project_id, name, status, source_filename, created_at, imported_at),
+                        (
+                            project_id,
+                            name,
+                            status,
+                            source_filename,
+                            owner_id,
+                            created_at,
+                            imported_at,
+                        ),
                     )
                     temporary.replace(final_path)
             except Exception:
