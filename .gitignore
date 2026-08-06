@@ -1,6 +1,7 @@
 .env
 .venv/
 .mineru-venv/
+.mineru-models/
 __pycache__/
 .pytest_cache/
 tmp/
@@ -10,3 +11,4 @@ models/
 runtime/
 logs/
 .llama-server.pid
+.embedding-server.pid

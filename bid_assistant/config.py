@@ -19,6 +19,13 @@ def _resolve_data_dir(value: str) -> Path:
     return path.resolve()
 
 
+def _default_mineru_python() -> str:
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return ""
+    return str(Path(local_app_data) / "BidAssistantRuntime" / "mineru-venv" / "Scripts" / "python.exe")
+
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = _resolve_data_dir(os.getenv("BID_ASSISTANT_DATA_DIR", "./data"))
@@ -31,12 +38,17 @@ class Settings:
     ragflow_base_url: str = os.getenv("RAGFLOW_BASE_URL", "http://localhost:9380").rstrip("/")
     ragflow_api_key: str = os.getenv("RAGFLOW_API_KEY", "")
     mineru_cli: str = os.getenv("MINERU_CLI", "mineru")
+    mineru_python: str = os.getenv("MINERU_PYTHON", "").strip() or _default_mineru_python()
     mineru_backend: str = os.getenv("MINERU_BACKEND", "pipeline")
+    mineru_method: str = os.getenv("MINERU_METHOD", "ocr")
+    mineru_language: str = os.getenv("MINERU_LANGUAGE", "ch")
     mineru_timeout_seconds: int = int(os.getenv("MINERU_TIMEOUT_SECONDS", "1800"))
     embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "").rstrip("/")
     embedding_api_key: str = os.getenv("EMBEDDING_API_KEY", "")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
     embedding_timeout_seconds: int = int(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "120"))
+    embedding_batch_size: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+    embedding_query_instruction: str = os.getenv("EMBEDDING_QUERY_INSTRUCTION", "").strip()
     vector_min_files: int = int(os.getenv("VECTOR_MIN_FILES", "40"))
     auth_session_timeout_minutes: int = int(os.getenv("AUTH_SESSION_TIMEOUT_MINUTES", "30"))
 

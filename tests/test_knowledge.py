@@ -89,4 +89,5 @@ def test_hybrid_vector_search_activates_at_threshold_and_caches_embeddings(tmp_p
     search_knowledge("灾备恢复", files, embedding_client=client, vector_min_files=2)
 
     assert first_results[0].source_file == "历史.txt"
-    assert len(client.calls) == 4
+    assert len(client.calls) == 3
+    assert len(client.calls[1]) == 2

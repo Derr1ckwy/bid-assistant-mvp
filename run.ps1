@@ -46,4 +46,30 @@ if ($baseUrl -match 'localhost:11434|127\.0\.0\.1:11434') {
     }
 }
 
+$embeddingBaseUrl = ""
+if (Test-Path -LiteralPath $envPath) {
+    $embeddingBaseUrlLine = Get-Content -LiteralPath $envPath -Encoding UTF8 |
+        Where-Object { $_ -match '^EMBEDDING_BASE_URL=' } |
+        Select-Object -First 1
+    if ($embeddingBaseUrlLine) {
+        $embeddingBaseUrl = ($embeddingBaseUrlLine -split '=', 2)[1].Trim('"')
+    }
+}
+
+if ($embeddingBaseUrl -match 'localhost:11435|127\.0\.0\.1:11435') {
+    $embeddingListening = Get-NetTCPConnection -LocalPort 11435 -State Listen -ErrorAction SilentlyContinue
+    if (-not $embeddingListening) {
+        $embeddingStarter = Join-Path $projectRoot "start_embedding.ps1"
+        $embeddingModel = Join-Path $projectRoot "models\qwen3-embedding-0.6b\Qwen3-Embedding-0.6B-Q8_0.gguf"
+        if ((Test-Path -LiteralPath $embeddingStarter) -and (Test-Path -LiteralPath $embeddingModel)) {
+            try {
+                & $embeddingStarter
+            }
+            catch {
+                Write-Warning "Embedding service did not start: $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 & $pythonPath -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501

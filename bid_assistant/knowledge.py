@@ -96,13 +96,22 @@ def search_knowledge(
                 records.append((category, path.name, text, float(score), file_key))
     if vector_enabled and records:
         try:
-            query_vector = client.embed([query])[0]
+            embed_query = getattr(client, "embed_query", None)
+            query_vector = embed_query(query) if callable(embed_query) else client.embed([query])[0]
             missing_by_file: dict[tuple[str, int, int, str], list[str]] = {}
             for _, _, text, _, file_key in records:
                 if file_key not in _VECTOR_CACHE:
                     missing_by_file.setdefault(file_key, []).append(text)
-            for file_key, texts in missing_by_file.items():
-                _VECTOR_CACHE[file_key] = tuple(tuple(vector) for vector in client.embed(texts))
+            if missing_by_file:
+                missing_keys = list(missing_by_file)
+                missing_texts = [text for key in missing_keys for text in missing_by_file[key]]
+                missing_vectors = client.embed(missing_texts)
+                vector_offset = 0
+                for file_key in missing_keys:
+                    file_texts = missing_by_file[file_key]
+                    file_vectors = missing_vectors[vector_offset : vector_offset + len(file_texts)]
+                    _VECTOR_CACHE[file_key] = tuple(tuple(vector) for vector in file_vectors)
+                    vector_offset += len(file_texts)
             offsets: dict[tuple[str, int, int, str], int] = {}
             max_keyword = max((record[3] for record in records), default=0.0)
             candidates: list[KnowledgeChunk] = []

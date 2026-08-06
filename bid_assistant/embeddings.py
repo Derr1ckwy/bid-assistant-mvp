@@ -18,6 +18,8 @@ class OpenAICompatibleEmbeddingClient:
     api_key: str
     model: str
     timeout: int = 120
+    batch_size: int = 16
+    query_instruction: str = ""
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "OpenAICompatibleEmbeddingClient":
@@ -26,6 +28,8 @@ class OpenAICompatibleEmbeddingClient:
             settings.embedding_api_key,
             settings.embedding_model,
             settings.embedding_timeout_seconds,
+            settings.embedding_batch_size,
+            settings.embedding_query_instruction,
         )
 
     @property
@@ -36,9 +40,7 @@ class OpenAICompatibleEmbeddingClient:
     def cache_key(self) -> str:
         return f"{self.base_url}|{self.model}"
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        if not self.configured:
-            raise EmbeddingError("未配置向量模型。")
+    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         payload: dict[str, Any] = {"model": self.model, "input": texts}
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -61,3 +63,20 @@ class OpenAICompatibleEmbeddingClient:
             raise EmbeddingError(f"向量接口请求失败：{exc}") from exc
         except (ValueError, TypeError, AttributeError) as exc:
             raise EmbeddingError("向量接口返回格式不正确。") from exc
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not self.configured:
+            raise EmbeddingError("未配置向量模型。")
+        if not texts:
+            return []
+        batch_size = max(1, self.batch_size)
+        vectors: list[list[float]] = []
+        for index in range(0, len(texts), batch_size):
+            vectors.extend(self._embed_batch(texts[index : index + batch_size]))
+        return vectors
+
+    def embed_query(self, query: str) -> list[float]:
+        value = query
+        if self.query_instruction:
+            value = f"Instruct: {self.query_instruction}\nQuery: {query}"
+        return self.embed([value])[0]

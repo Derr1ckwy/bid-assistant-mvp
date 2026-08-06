@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import html
 import json
+import os
 import shutil
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from bid_assistant.config import Settings
+from bid_assistant.config import PROJECT_ROOT, Settings
 from bid_assistant.models import ParsedDocument, ParsedPage
 
 
@@ -14,20 +17,58 @@ class MinerUError(RuntimeError):
     pass
 
 
+class _TableTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        value = " ".join(data.split())
+        if value:
+            self.parts.append(value)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"}:
+            self.parts.append(" | ")
+        elif tag == "tr":
+            self.parts.append("\n")
+
+    def get_text(self) -> str:
+        lines = [line.strip(" |") for line in "".join(self.parts).splitlines()]
+        return "\n".join(line for line in lines if line).strip()
+
+
+def _table_html_to_text(value: str) -> str:
+    parser = _TableTextParser()
+    try:
+        parser.feed(value)
+        parser.close()
+    except (ValueError, TypeError):
+        return html.unescape(value).strip()
+    return html.unescape(parser.get_text())
+
+
 class MinerUClient:
     def __init__(self, settings: Settings):
         self.cli = settings.mineru_cli
+        self.python = settings.mineru_python
         self.backend = settings.mineru_backend
+        self.method = settings.mineru_method
+        self.language = settings.mineru_language
         self.timeout = settings.mineru_timeout_seconds
 
-    def executable(self) -> str | None:
+    def _command_prefix(self) -> list[str] | None:
+        configured_python = Path(self.python) if self.python else None
+        if configured_python and configured_python.is_file():
+            return [os.path.abspath(str(configured_python)), "-m", "mineru.cli.client"]
         configured = Path(self.cli)
         if configured.is_file():
-            return str(configured.resolve())
-        return shutil.which(self.cli)
+            return [str(configured.resolve())]
+        executable = shutil.which(self.cli)
+        return [executable] if executable else None
 
     def is_available(self) -> bool:
-        return self.executable() is not None
+        return self._command_prefix() is not None
 
     @staticmethod
     def _pages_from_content_list(path: Path) -> list[ParsedPage]:
@@ -43,7 +84,11 @@ class MinerUClient:
         for item in payload:
             if not isinstance(item, dict):
                 continue
+            if item.get("type") in {"page_number", "header", "footer"}:
+                continue
             text = item.get("text") or item.get("content") or item.get("markdown") or ""
+            if not text and isinstance(item.get("table_body"), str):
+                text = _table_html_to_text(item["table_body"])
             if not isinstance(text, str) or not text.strip():
                 continue
             raw_page = item.get("page_idx", item.get("page_index", item.get("page_no")))
@@ -59,14 +104,25 @@ class MinerUClient:
 
     def parse(self, source: str | Path) -> ParsedDocument:
         source_path = Path(source)
-        executable = self.executable()
-        if executable is None:
+        command_prefix = self._command_prefix()
+        if command_prefix is None:
             raise MinerUError("未检测到 MinerU。请运行 setup_mineru.ps1 完成独立环境安装。")
         with TemporaryDirectory(prefix="bid-assistant-mineru-") as temporary_dir:
             output_dir = Path(temporary_dir) / "output"
-            command = [executable, "-p", str(source_path.resolve()), "-o", str(output_dir)]
+            command = [*command_prefix, "-p", str(source_path.resolve()), "-o", str(output_dir)]
             if self.backend:
                 command.extend(["-b", self.backend])
+            if self.method:
+                command.extend(["-m", self.method])
+            if self.language:
+                command.extend(["-l", self.language])
+            environment = os.environ.copy()
+            model_root = PROJECT_ROOT / ".mineru-models"
+            model_config = model_root / "mineru.json"
+            if model_config.is_file():
+                environment.setdefault("MINERU_TOOLS_CONFIG_JSON", str(model_config.resolve()))
+                environment.setdefault("MINERU_MODEL_SOURCE", "modelscope")
+                environment.setdefault("MODELSCOPE_CACHE", str((model_root / "modelscope").resolve()))
             try:
                 completed = subprocess.run(
                     command,
@@ -76,6 +132,7 @@ class MinerUClient:
                     errors="replace",
                     timeout=self.timeout,
                     check=False,
+                    env=environment,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise MinerUError(f"MinerU 解析超过 {self.timeout} 秒，已停止本次增强解析。") from exc
