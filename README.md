@@ -90,6 +90,29 @@ LLM_COMPACT_MAX_OUTPUT_TOKENS=512
 
 `run.ps1` 会优先自动启动本地 `llama-server`，继续使用 `http://localhost:11434/v1`、模型别名 `qwen3:4b` 和本地 API Key `ollama`；服务只监听本机地址并限制浏览器来源。本地文件不存在时才尝试已有 Ollama。可用 `.\stop_local_llm.ps1` 停止由项目管理的模型进程。也可以改用任意 OpenAI 兼容云端接口；API Key 仅保存在被 Git 忽略的 `.env` 中，不进入项目备份。
 
+云端 OpenAI API 示例（模型名称以你的 API 账号实际可用列表为准）：
+
+```text
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=你的可用文本模型
+LLM_API_KEY=sk-...
+```
+
+系统当前文字链路使用 `/chat/completions`，因此也兼容多数 OpenAI 兼容代理。ChatGPT 网页订阅和 API 计费是两个独立账户体系，必须使用 API 平台创建的 API Key；不要把 Key 写进 Git、项目备份或提交给他人。
+
+需要生成教育培训类课程封面、课堂示意图或方案配图时，可使用云端图片脚本（不会自动伪造营业执照、证书或业绩证明）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\generate_cloud_image.py `
+  --base-url https://api.openai.com/v1 `
+  --api-key $env:OPENAI_API_KEY `
+  --model gpt-image-1 `
+  --prompt "现代职业培训课堂，教师与学员协作，简洁商务插画，不出现品牌和证书" `
+  --output "D:\灵坤\投标文件\教育培训_模拟RAG知识库\课堂示意图.png"
+```
+
+图片输出只作为方案配图或内部演示素材，正式投标仍需人工检查版权、事实和客户要求。
+
 模型健康检查会区分服务未启动、连接超时、鉴权失败、模型未下载和接口响应异常。选择 LLM 分析或生成时，若预检失败会立即切换到规则模式，不再等待完整请求超时。
 
 当招标文件超过 6 万字符时，分析会自动使用长文档精简模式：每段约 8,000 字符，每类最多提取 2 条高价值候选，并限制模型输出长度。这样可以避免本地 4B 模型因一次生成过长 JSON 而超时或截断；规则基线会继续补充完整条目，最终仍需人工确认。
@@ -180,6 +203,8 @@ MinerU 使用独立虚拟环境，避免其模型和依赖影响主应用：
 ```
 
 公开样本的来源、SHA-256 和使用限制记录在 `D:\灵坤\投标文件\公开测试文件\公开测试文件来源与使用说明.md`。其中两份中文样本的原仓库未声明许可证，一份多语种边界样本来自 MIT 仓库；所有 PDF 默认只在本机测试，不进入本项目 Git。
+
+教育培训主题的模拟 RAG 资料位于 `D:\灵坤\投标文件\教育培训_模拟RAG知识库`，由 `scripts\generate_education_rag_corpus.py` 生成，包含企业、产品、历史方案各 15 份 Markdown，以及 CSV 索引、JSON 事实卡片和使用说明。全部内容仅用于检索和排版测试，不能作为真实企业证明材料。
 
 ## 数据位置
 
